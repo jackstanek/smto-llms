@@ -1,265 +1,221 @@
 //! Macros for ergonomic theory construction.
 //!
-//! # Term macros
-//! - `var!(v)` — variable term
-//! - `con!(c)` — constant term
-//! - `app!(f, t1, t2, ...)` — function application term
+//! Each statement is wrapped in `[...]` so that the entire body can be
+//! matched in a single non-recursive pass.  Without the brackets, macro
+//! invocations like `sorts!(...)` are three token trees (`ident`, `!`,
+//! `group`) and cannot be captured as a single `$stmt:tt`.
 //!
-//! # Atom macros
-//! - `pred!(p, t1, t2, ...)` — predicate application
-//! - `eq!(t1, t2)` — equality
-//! - `neq!(t1, t2)` — disequality
+//! # Usage
 //!
-//! # Axiom macros
-//! All return the `AxiomId` assigned by the theory.
+//! ```rust,ignore
+//! let t = theory! {
+//!     [sorts!(Employee, Department)]
 //!
-//! ```ignore
-//! horn!(theory,
-//!     name: "direct_managers_fire",
-//!     implicit: false,
-//!     nl: "Direct managers can fire their reports",
-//!     vars: [(p, emp_sort), (q, emp_sort)],
-//!     body: [pred!(manages, var!(p), var!(q))],
-//!     head: pred!(can_fire, var!(p), var!(q)),
-//! );
+//!     [predicates!(
+//!         manages(Employee, Employee),
+//!         can_fire(Employee, Employee),
+//!     )]
+//!
+//!     [functions!(
+//!         works_in(Employee) -> Department,
+//!     )]
+//!
+//!     [constants!(alice, bob, engineering)]
+//!
+//!     [horn! {
+//!         name: "manages_can_fire",
+//!         implicit: false,
+//!         nl: "Managers can fire their direct reports",
+//!         forall (x: Employee, y: Employee) {
+//!             body: manages(x, y);
+//!             head: can_fire(x, y);
+//!         }
+//!     }]
+//!
+//!     [integrity! {
+//!         name: "no_self_manage",
+//!         implicit: true,
+//!         nl: "Nobody manages themselves",
+//!         forall (x: Employee) {
+//!             body: manages(x, x);
+//!         }
+//!     }]
+//! };
 //! ```
+//!
+//! ## Scope and ordering
+//!
+//! All `let` bindings from `sorts!`, `predicates!`, `functions!`, and
+//! `constants!` are emitted sequentially, so later statements can reference
+//! `SortId`/`SymbolId` variables declared earlier.  Variables declared inside
+//! `forall (...)` are local to their axiom block and do not escape.
+//!
+//! ## Constants vs. domain elements
+//!
+//! `constants!` declares named 0-ary symbols at the **Theory** level.
+//! Finite domain elements for `Instance` are supplied via `Theory::instantiate`.
 
 // ---------------------------------------------------------------------------
-// Term constructors
+// theory_stmt! — single-statement, non-recursive handler
+//
+// Each arm matches the content of one `[...]` bracket from theory!.
+// No arm is recursive; depth is O(1) per statement.
 // ---------------------------------------------------------------------------
 
-/// Construct a variable term: `var!(v)` → `Term::Var(v)`.
-#[macro_export]
-macro_rules! var {
-    ($v:expr) => {
-        $crate::theories::Term::Var($v)
+macro_rules! theory_stmt {
+    // ------------------------------------------------------------------
+    // [sorts!(S, T, ...)]
+    // ------------------------------------------------------------------
+    ($t:ident, [sorts ! ($($sort:ident),* $(,)?)]) => {
+        $(
+            let $sort = $t.declare_sort(stringify!($sort));
+        )*
     };
-}
 
-/// Construct a constant term: `con!(c)` → `Term::Const(c)`.
-#[macro_export]
-macro_rules! con {
-    ($c:expr) => {
-        $crate::theories::Term::Const($c)
+    // ------------------------------------------------------------------
+    // [predicates!(p(S1, S2), q(S), ...)]
+    // ------------------------------------------------------------------
+    ($t:ident, [predicates ! ($($pred:ident ( $($param:ident),* $(,)? )),* $(,)?)]) => {
+        $(
+            let $pred = $t.declare_predicate(stringify!($pred), vec![$($param),*]);
+        )*
     };
-}
 
-/// Construct a function application term: `app!(f, t1, t2)` → `Term::App { .. }`.
-#[macro_export]
-macro_rules! app {
-    ($f:expr $(,)?) => {
-        $crate::theories::Term::App {
-            symbol: $f,
-            args: vec![],
+    // ------------------------------------------------------------------
+    // [functions!(f(S1, S2) -> R, ...)]
+    // ------------------------------------------------------------------
+    ($t:ident, [functions ! ($($func:ident ( $($param:ident),* $(,)? ) -> $ret:ident),* $(,)?)]) => {
+        $(
+            #[allow(unused_variables)]
+            let $func = $t.declare_function(stringify!($func), vec![$($param),*], $ret);
+        )*
+    };
+
+    // ------------------------------------------------------------------
+    // [constants!(a, b, c)]
+    // ------------------------------------------------------------------
+    ($t:ident, [constants ! ($($con:ident),* $(,)?)]) => {
+        $(
+            #[allow(unused_variables)]
+            let $con = $t.declare_constant(stringify!($con));
+        )*
+    };
+
+    // ------------------------------------------------------------------
+    // [horn! { name: ..., implicit: ..., nl: ...,
+    //          forall (...) { body: ...; head: ...; } }]
+    // ------------------------------------------------------------------
+    ($t:ident, [horn ! {
+        name:     $name:expr,
+        implicit: $implicit:expr,
+        nl:       $nl:expr,
+        forall ($($var:ident : $sort_var:ident),* $(,)?) {
+            body: $($bpred:ident ( $($barg:ident),* )),+ $(,)? ;
+            head: $hpred:ident ( $($harg:ident),* ) $(,)? ;
+        }
+    }]) => {
+        {
+            let mut __var_idx: u32 = 0;
+            $(
+                #[allow(unused_variables)]
+                let $var = {
+                    let __v = $crate::theories::VarId(__var_idx);
+                    __var_idx += 1;
+                    __v
+                };
+            )*
+            let __vars: Vec<($crate::theories::VarId, $crate::theories::SortId)> =
+                vec![$(($var, $sort_var)),*];
+            let __body: Vec<$crate::theories::Atom> = vec![
+                $(
+                    $crate::theories::Atom::Predicate {
+                        symbol: $bpred,
+                        args: vec![$( $crate::theories::Term::Var($barg) ),*],
+                    }
+                ),+
+            ];
+            let __head = $crate::theories::Atom::Predicate {
+                symbol: $hpred,
+                args: vec![$( $crate::theories::Term::Var($harg) ),*],
+            };
+            let __meta = $crate::theories::AxiomMeta::new($name, $implicit, $nl, vec![]);
+            $t.add_axiom(
+                __meta,
+                __vars,
+                $crate::theories::AxiomBody::Horn { body: __body, head: __head },
+            );
         }
     };
-    ($f:expr, $($arg:expr),+ $(,)?) => {
-        $crate::theories::Term::App {
-            symbol: $f,
-            args: vec![$($arg),+],
+
+    // ------------------------------------------------------------------
+    // [integrity! { name: ..., implicit: ..., nl: ...,
+    //               forall (...) { body: ...; } }]
+    // ------------------------------------------------------------------
+    ($t:ident, [integrity ! {
+        name:     $name:expr,
+        implicit: $implicit:expr,
+        nl:       $nl:expr,
+        forall ($($var:ident : $sort_var:ident),* $(,)?) {
+            body: $($bpred:ident ( $($barg:ident),* )),+ $(,)? ;
+        }
+    }]) => {
+        {
+            let mut __var_idx: u32 = 0;
+            $(
+                #[allow(unused_variables)]
+                let $var = {
+                    let __v = $crate::theories::VarId(__var_idx);
+                    __var_idx += 1;
+                    __v
+                };
+            )*
+            let __vars: Vec<($crate::theories::VarId, $crate::theories::SortId)> =
+                vec![$(($var, $sort_var)),*];
+            let __body: Vec<$crate::theories::Atom> = vec![
+                $(
+                    $crate::theories::Atom::Predicate {
+                        symbol: $bpred,
+                        args: vec![$( $crate::theories::Term::Var($barg) ),*],
+                    }
+                ),+
+            ];
+            let __meta = $crate::theories::AxiomMeta::new($name, $implicit, $nl, vec![]);
+            $t.add_axiom(
+                __meta,
+                __vars,
+                $crate::theories::AxiomBody::Integrity { body: __body },
+            );
         }
     };
 }
 
 // ---------------------------------------------------------------------------
-// Atom constructors
+// theory! — single-pass, non-recursive dispatcher
+//
+// Accepts a sequence of `[statement]` blocks and expands them in one pass.
+// Each `[...]` is a single token tree, so $($stmt:tt)* matches them without
+// any recursion.  The recursion depth is O(1) regardless of theory size.
 // ---------------------------------------------------------------------------
 
-/// Construct a predicate atom: `pred!(p, t1, t2)` → `Atom::Predicate { .. }`.
-#[macro_export]
-macro_rules! pred {
-    ($p:expr $(,)?) => {
-        $crate::theories::Atom::Predicate {
-            symbol: $p,
-            args: vec![],
-        }
-    };
-    ($p:expr, $($arg:expr),+ $(,)?) => {
-        $crate::theories::Atom::Predicate {
-            symbol: $p,
-            args: vec![$($arg),+],
-        }
-    };
-}
-
-/// Construct an equality atom: `eq!(t1, t2)` → `Atom::Eq(t1, t2)`.
-#[macro_export]
-macro_rules! eq {
-    ($t1:expr, $t2:expr) => {
-        $crate::theories::Atom::Eq($t1, $t2)
-    };
-}
-
-/// Construct a disequality atom: `neq!(t1, t2)` → `Atom::Neq(t1, t2)`.
-#[macro_export]
-macro_rules! neq {
-    ($t1:expr, $t2:expr) => {
-        $crate::theories::Atom::Neq($t1, $t2)
-    };
-}
-
-// ---------------------------------------------------------------------------
-// Axiom macros
-// ---------------------------------------------------------------------------
-
-/// Add a Horn clause axiom to a theory: body₁ ∧ ... ∧ bodyₙ → head.
+/// Build a [`Theory`][crate::theories::Theory] from a concise DSL.
 ///
-/// Returns the `AxiomId`.
+/// Wrap each statement in `[...]` so that the entire body is matched in a
+/// single non-recursive pass.  Supported statement forms:
 ///
-/// ```ignore
-/// horn!(theory,
-///     name: "chain_fire",
-///     category: AxiomCategory::Authority,
-///     implicit: true,
-///     nl: "Anyone up the chain of command can fire",
-///     vars: [(p, emp), (q, emp)],
-///     body: [pred!(manages_plus, var!(p), var!(q))],
-///     head: pred!(can_fire, var!(p), var!(q)),
-/// );
-/// ```
-#[macro_export]
-macro_rules! horn {
-    ($theory:expr,
-     name: $name:literal,
-     implicit: $imp:expr,
-     nl: $nl:literal,
-     vars: [$( ($v:expr, $s:expr) ),* $(,)?],
-     body: [$( $body:expr ),* $(,)?],
-     head: $head:expr
-     $(, depends_on: [$( $dep:expr ),* $(,)?])?
-     $(,)?
-    ) => {
-        $theory.add_axiom(
-            $crate::theories::AxiomMeta::new(
-                $name,
-                $imp,
-                $nl,
-                vec![$($($dep),*)?],
-            ),
-            vec![$(($v, $s)),*],
-            $crate::theories::AxiomBody::Horn {
-                body: vec![$($body),*],
-                head: $head,
-            },
-        )
-    };
-}
-
-/// Add an integrity constraint axiom to a theory: ¬(body₁ ∧ ... ∧ bodyₙ).
-///
-/// Returns the `AxiomId`.
-///
-/// ```ignore
-/// integrity!(theory,
-///     name: "no_self_fire",
-///     implicit: true,
-///     nl: "No one can fire themselves",
-///     vars: [(p, emp)],
-///     body: [pred!(can_fire, var!(p), var!(p))],
-/// );
-/// ```
-#[macro_export]
-macro_rules! integrity {
-    ($theory:expr,
-     name: $name:literal,
-     implicit: $imp:expr,
-     nl: $nl:literal,
-     vars: [$( ($v:expr, $s:expr) ),* $(,)?],
-     body: [$( $body:expr ),+ $(,)?]
-     $(, depends_on: [$( $dep:expr ),* $(,)?])?
-     $(,)?
-    ) => {
-        $theory.add_axiom(
-            $crate::theories::AxiomMeta::new(
-                $name,
-                $imp,
-                $nl,
-                vec![$($($dep),*)?],
-            ),
-            vec![$(($v, $s)),*],
-            $crate::theories::AxiomBody::Integrity {
-                body: vec![$($body),+],
-            },
-        )
-    };
-}
-
-/// Add a functional fact axiom to a theory: f(args...) = value.
-///
-/// Returns the `AxiomId`.
-///
-/// ```ignore
-/// functional!(theory,
-///     name: "alice_works_at",
-///     implicit: false,
-///     nl: "Alice works at Acme",
-///     symbol: works_at,
-///     args: [con!(alice)],
-///     value: con!(acme),
-/// );
-/// ```
-#[macro_export]
-macro_rules! functional {
-    ($theory:expr,
-     name: $name:literal,
-     implicit: $imp:expr,
-     nl: $nl:literal,
-     symbol: $sym:expr,
-     args: [$( $arg:expr ),* $(,)?],
-     value: $val:expr
-     $(, depends_on: [$( $dep:expr ),* $(,)?])?
-     $(,)?
-    ) => {
-        $theory.add_axiom(
-            $crate::theories::AxiomMeta::new(
-                $name,
-                $imp,
-                $nl,
-                vec![$($($dep),*)?],
-            ),
-            vec![],
-            $crate::theories::AxiomBody::FunctionalFact {
-                symbol: $sym,
-                args: vec![$($arg),*],
-                value: $val,
-            },
-        )
-    };
-}
-
-/// Add a general formula axiom to a theory.
-///
-/// Returns the `AxiomId`.
-///
-/// ```ignore
-/// general!(theory,
-///     name: "custom_rule",
-///     implicit: false,
-///     nl: "A custom domain rule",
-///     vars: [(p, emp)],
-///     formula: Formula::Not(Box::new(Formula::Atom(pred!(can_fire, var!(p), var!(p))))),
-/// );
-/// ```
-#[macro_export]
-macro_rules! general {
-    ($theory:expr,
-     name: $name:literal,
-     implicit: $imp:expr,
-     nl: $nl:literal,
-     vars: [$( ($v:expr, $s:expr) ),* $(,)?],
-     formula: $formula:expr
-     $(, depends_on: [$( $dep:expr ),* $(,)?])?
-     $(,)?
-    ) => {
-        $theory.add_axiom(
-            $crate::theories::AxiomMeta::new(
-                $name,
-                $imp,
-                $nl,
-                vec![$($($dep),*)?],
-            ),
-            vec![$(($v, $s)),*],
-            $crate::theories::AxiomBody::General($formula),
-        )
-    };
+/// | Form | Effect |
+/// |------|--------|
+/// | `[sorts!(S, T, ...)]` | Declare sorts; bind `SortId`s to the identifiers |
+/// | `[predicates!(p(S1, S2), ...)]` | Declare predicate symbols |
+/// | `[functions!(f(S1) -> R, ...)]` | Declare function symbols |
+/// | `[constants!(a, b, ...)]` | Declare 0-ary named constants |
+/// | `[horn! { name: ..., implicit: ..., nl: ..., forall (...) { body: ...; head: ...; } }]` | Horn axiom |
+/// | `[integrity! { name: ..., implicit: ..., nl: ..., forall (...) { body: ...; } }]` | Integrity constraint |
+macro_rules! theory {
+    ($($stmt:tt)*) => {{
+        let mut __theory = $crate::theories::Theory::new();
+        $(
+            theory_stmt!(__theory, $stmt);
+        )*
+        __theory
+    }};
 }

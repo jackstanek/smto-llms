@@ -158,8 +158,20 @@ impl Axiom {
         self.id
     }
 
-    pub fn meta(&self) -> &AxiomMeta {
-        &self.meta
+    pub fn name(&self) -> &str {
+        self.meta.name()
+    }
+
+    pub fn implicit_by_default(&self) -> bool {
+        self.meta.implicit_by_default()
+    }
+
+    pub fn natural_language(&self) -> &str {
+        self.meta.natural_language()
+    }
+
+    pub fn depends_on(&self) -> &[AxiomId] {
+        self.meta.depends_on()
     }
 
     pub fn vars(&self) -> &[(VarId, SortId)] {
@@ -214,7 +226,7 @@ impl AxiomMeta {
 /// A theory schema: sorts and symbols declared, axioms defined parametrically.
 /// Becomes an Instance when sorts are grounded and facts are added.
 pub struct Theory {
-    name: String,
+    name: Option<String>,
     sorts: SlotMap<SortId, SortDecl>,
     symbols: SlotMap<SymbolId, SymbolDecl>,
     axioms: SlotMap<AxiomId, Axiom>,
@@ -242,14 +254,28 @@ impl Theory {
         &self.symbols[id]
     }
 
+    pub fn axioms(&self) -> slotmap::basic::Iter<'_, AxiomId, Axiom> {
+        self.axioms.iter()
+    }
+
     pub fn axiom(&self, id: AxiomId) -> &Axiom {
         &self.axioms[id]
     }
 
-    /// Construct a new empty theory with the given name.
-    pub fn new(name: impl Into<String>) -> Self {
+    /// Construct a new empty theory.
+    pub fn new() -> Self {
         Self {
-            name: name.into(),
+            name: None,
+            sorts: SlotMap::with_key(),
+            symbols: SlotMap::with_key(),
+            axioms: SlotMap::with_key(),
+        }
+    }
+
+    /// Construct a new empty theory with the given name.
+    pub fn new_named(name: impl Into<String>) -> Self {
+        Self {
+            name: Some(name.into()),
             sorts: SlotMap::with_key(),
             symbols: SlotMap::with_key(),
             axioms: SlotMap::with_key(),
@@ -264,7 +290,7 @@ impl Theory {
         })
     }
 
-    /// Add a predicate to the theory.
+    /// Add a  predicate to the theory.
     pub fn declare_predicate(&mut self, name: impl Into<String>, params: Vec<SortId>) -> SymbolId {
         self.symbols.insert_with_key(|id| SymbolDecl {
             id,
@@ -364,120 +390,65 @@ mod tests {
     /// that all axiom variants round-trip through the Theory.
     #[test]
     fn macro_theory_construction() {
-        let mut t = Theory::new("workplace");
+        let t = theory! {
+            [sorts!(Employee, Department)]
 
-        // Sorts
-        let emp = t.declare_sort("Employee");
-        let dept = t.declare_sort("Department");
+            [predicates!(
+                manages(Employee, Employee),
+                can_fire(Employee, Employee),
+                reports_to(Employee, Employee),
+            )]
 
-        // Symbols
-        let manages = t.declare_predicate("manages", vec![emp, emp]);
-        let can_fire = t.declare_predicate("can_fire", vec![emp, emp]);
-        let works_in = t.declare_function("works_in", vec![emp], dept);
-        let alice = t.declare_constant("alice");
-        let bob = t.declare_constant("bob");
-        let engineering = t.declare_constant("engineering");
+            [functions!(
+                works_in(Employee) -> Department,
+            )]
 
-        // Variables
-        let p = VarId(0);
-        let q = VarId(1);
+            [constants!(alice, bob, engineering)]
 
-        // Horn: manages(p,q) => can_fire(p,q)
-        let a1 = horn!(t,
-            name: "direct_managers_fire",
-            implicit: false,
-            nl: "Direct managers can fire their reports",
-            vars: [(p, emp), (q, emp)],
-            body: [pred!(manages, var!(p), var!(q))],
-            head: pred!(can_fire, var!(p), var!(q)),
-        );
+            [horn! {
+                name:     "manages_can_fire",
+                implicit: false,
+                nl:       "Managers can fire their direct reports",
+                forall (x: Employee, y: Employee) {
+                    body: manages(x, y);
+                    head: can_fire(x, y);
+                }
+            }]
 
-        // Integrity: not(can_fire(p,p))
-        let a2 = integrity!(t,
-            name: "no_self_fire",
-            implicit: true,
-            nl: "No one can fire themselves",
-            vars: [(p, emp)],
-            body: [pred!(can_fire, var!(p), var!(p))],
-        );
+            [horn! {
+                name:     "manages_reports_to",
+                implicit: true,
+                nl:       "If X manages Y then Y reports to X",
+                forall (x: Employee, y: Employee) {
+                    body: manages(x, y);
+                    head: reports_to(y, x);
+                }
+            }]
 
-        // Functional: works_in(alice) = engineering
-        let a3 = functional!(t,
-            name: "alice_works_in_eng",
-            implicit: false,
-            nl: "Alice works in engineering",
-            symbol: works_in,
-            args: [con!(alice)],
-            value: con!(engineering),
-        );
+            [integrity! {
+                name:     "no_self_manage",
+                implicit: true,
+                nl:       "Nobody manages themselves",
+                forall (x: Employee) {
+                    body: manages(x, x);
+                }
+            }]
+        };
 
-        // General: forall p q. manages(p,q) => can_fire(p,q)  (redundant, just testing the macro)
-        let a4 = general!(t,
-            name: "custom_rule",
-            implicit: false,
-            nl: "A custom domain rule",
-            vars: [(p, emp), (q, emp)],
-            formula: Formula::Implies(
-                Box::new(Formula::Atom(pred!(manages, var!(p), var!(q)))),
-                Box::new(Formula::Atom(pred!(can_fire, var!(p), var!(q)))),
-            ),
-        );
+        // Verify sorts, symbols, and axioms were registered.
+        assert_eq!(t.sorts().count(), 2);
+        // 3 predicates + 1 function + 3 constants
+        assert_eq!(t.symbols().count(), 7);
+        assert_eq!(t.axioms().count(), 3);
 
-        // Horn with depends_on
-        let _a5 = horn!(t,
-            name: "derived_fire",
-            implicit: true,
-            nl: "Derived from direct managers fire",
-            vars: [(p, emp), (q, emp)],
-            body: [pred!(manages, var!(p), var!(q))],
-            head: pred!(can_fire, var!(p), var!(q)),
-            depends_on: [a1],
-        );
+        // Check axiom metadata round-trips.
+        let names: Vec<&str> = t.axioms().map(|(_, a)| a.name()).collect();
+        assert!(names.contains(&"manages_can_fire"));
+        assert!(names.contains(&"manages_reports_to"));
+        assert!(names.contains(&"no_self_manage"));
 
-        // Verify axiom metadata
-        assert_eq!(t.axiom(a1).meta().name(), "direct_managers_fire");
-        assert!(!t.axiom(a1).meta().implicit_by_default());
-        assert_eq!(t.axiom(a2).meta().name(), "no_self_fire");
-        assert!(t.axiom(a2).meta().implicit_by_default());
-        assert_eq!(t.axiom(a3).meta().name(), "alice_works_in_eng");
-        assert_eq!(t.axiom(a4).meta().name(), "custom_rule");
-
-        // Verify vars
-        assert_eq!(t.axiom(a1).vars().len(), 2);
-        assert_eq!(t.axiom(a2).vars().len(), 1);
-        assert_eq!(t.axiom(a3).vars().len(), 0); // functional facts are ground
-
-        // Verify body variant
-        assert!(matches!(t.axiom(a1).body(), AxiomBody::Horn { .. }));
-        assert!(matches!(t.axiom(a2).body(), AxiomBody::Integrity { .. }));
-        assert!(matches!(
-            t.axiom(a3).body(),
-            AxiomBody::FunctionalFact { .. }
-        ));
-        assert!(matches!(t.axiom(a4).body(), AxiomBody::General(_)));
-
-        // Verify term/atom macros produce expected structure
-        let term_v = var!(p);
-        assert!(matches!(term_v, Term::Var(VarId(0))));
-
-        let term_c = con!(alice);
-        assert!(matches!(term_c, Term::Const(_)));
-
-        let term_app = app!(works_in, var!(p));
-        assert!(matches!(term_app, Term::App { .. }));
-
-        let atom_p = pred!(manages, var!(p), var!(q));
-        assert!(matches!(atom_p, Atom::Predicate { .. }));
-
-        let atom_eq = eq!(var!(p), var!(q));
-        assert!(matches!(atom_eq, Atom::Eq(..)));
-
-        let atom_neq = neq!(var!(p), var!(q));
-        assert!(matches!(atom_neq, Atom::Neq(..)));
-
-        // Verify instantiation with all axioms active
-        let domain = HashMap::from([(emp, vec![alice, bob]), (dept, vec![engineering])]);
-        let instance = t.instantiate(domain);
-        assert_eq!(instance.active_axioms().len(), 5);
+        // implicit_by_default flags
+        let implicit_count = t.axioms().filter(|(_, a)| a.implicit_by_default()).count();
+        assert_eq!(implicit_count, 2);
     }
 }

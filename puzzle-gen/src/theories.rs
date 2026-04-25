@@ -1,4 +1,6 @@
-//! Representation of a first-order theory with implicit axioms.
+//! Representation of a first-order theory (schema) with implicit axioms. This
+//! framework allows building up a general theory which can be instantiated with
+//! different models.
 
 use std::collections::{HashMap, HashSet};
 

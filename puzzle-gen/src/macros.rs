@@ -1,28 +1,28 @@
 //! Macros for ergonomic theory construction.
 //!
-//! Each statement is wrapped in `[...]` so that the entire body can be
-//! matched in a single non-recursive pass.  Without the brackets, macro
-//! invocations like `sorts!(...)` are three token trees (`ident`, `!`,
-//! `group`) and cannot be captured as a single `$stmt:tt`.
+//! `theory!` matches `$($mac:ident ! $args:tt $(;)?)*`, where `$args:tt`
+//! captures the entire argument group (`(...)` or `{...}`) as a single token
+//! tree.  This is what keeps the expansion non-recursive: each statement is
+//! handed to `theory_stmt!` as `mac ! args` in one flat pass.
 //!
 //! # Usage
 //!
 //! ```rust,ignore
 //! let t = theory! {
-//!     [sorts!(Employee, Department)]
+//!     sorts!(Employee, Department);
 //!
-//!     [predicates!(
+//!     predicates!(
 //!         manages(Employee, Employee),
 //!         can_fire(Employee, Employee),
-//!     )]
+//!     );
 //!
-//!     [functions!(
+//!     functions!(
 //!         works_in(Employee) -> Department,
-//!     )]
+//!     );
 //!
-//!     [constants!(alice, bob, engineering)]
+//!     constants!(alice, bob, engineering);
 //!
-//!     [horn! {
+//!     horn! {
 //!         name: "manages_can_fire",
 //!         implicit: false,
 //!         nl: "Managers can fire their direct reports",
@@ -30,16 +30,16 @@
 //!             body: manages(x, y);
 //!             head: can_fire(x, y);
 //!         }
-//!     }]
+//!     };
 //!
-//!     [integrity! {
+//!     integrity! {
 //!         name: "no_self_manage",
 //!         implicit: true,
 //!         nl: "Nobody manages themselves",
 //!         forall (x: Employee) {
 //!             body: manages(x, x);
 //!         }
-//!     }]
+//!     };
 //! };
 //! ```
 //!
@@ -58,33 +58,34 @@
 // ---------------------------------------------------------------------------
 // theory_stmt! — single-statement, non-recursive handler
 //
-// Each arm matches the content of one `[...]` bracket from theory!.
-// No arm is recursive; depth is O(1) per statement.
+// Called by theory! as `theory_stmt!(__theory, mac ! args)`.
+// Each arm matches one `mac ! args` pair with no recursion.
 // ---------------------------------------------------------------------------
 
 macro_rules! theory_stmt {
     // ------------------------------------------------------------------
-    // [sorts!(S, T, ...)]
+    // sorts!(S, T, ...)
     // ------------------------------------------------------------------
-    ($t:ident, [sorts ! ($($sort:ident),* $(,)?)]) => {
+    ($t:ident, sorts ! ($($sort:ident),* $(,)?)) => {
         $(
+            #[allow(unused_variables)]
             let $sort = $t.declare_sort(stringify!($sort));
         )*
     };
 
     // ------------------------------------------------------------------
-    // [predicates!(p(S1, S2), q(S), ...)]
+    // predicates!(p(S1, S2), q(S), ...)
     // ------------------------------------------------------------------
-    ($t:ident, [predicates ! ($($pred:ident ( $($param:ident),* $(,)? )),* $(,)?)]) => {
+    ($t:ident, predicates ! ($($pred:ident ( $($param:ident),* $(,)? )),* $(,)?)) => {
         $(
             let $pred = $t.declare_predicate(stringify!($pred), vec![$($param),*]);
         )*
     };
 
     // ------------------------------------------------------------------
-    // [functions!(f(S1, S2) -> R, ...)]
+    // functions!(f(S1, S2) -> R, ...)
     // ------------------------------------------------------------------
-    ($t:ident, [functions ! ($($func:ident ( $($param:ident),* $(,)? ) -> $ret:ident),* $(,)?)]) => {
+    ($t:ident, functions ! ($($func:ident ( $($param:ident),* $(,)? ) -> $ret:ident),* $(,)?)) => {
         $(
             #[allow(unused_variables)]
             let $func = $t.declare_function(stringify!($func), vec![$($param),*], $ret);
@@ -92,9 +93,9 @@ macro_rules! theory_stmt {
     };
 
     // ------------------------------------------------------------------
-    // [constants!(a, b, c)]
+    // constants!(a, b, c)
     // ------------------------------------------------------------------
-    ($t:ident, [constants ! ($($con:ident),* $(,)?)]) => {
+    ($t:ident, constants ! ($($con:ident),* $(,)?)) => {
         $(
             #[allow(unused_variables)]
             let $con = $t.declare_constant(stringify!($con));
@@ -102,10 +103,10 @@ macro_rules! theory_stmt {
     };
 
     // ------------------------------------------------------------------
-    // [horn! { name: ..., implicit: ..., nl: ...,
-    //          forall (...) { body: ...; head: ...; } }]
+    // horn! { name: ..., implicit: ..., nl: ...,
+    //         forall (...) { body: ...; head: ...; } }
     // ------------------------------------------------------------------
-    ($t:ident, [horn ! {
+    ($t:ident, horn ! {
         name:     $name:expr,
         implicit: $implicit:expr,
         nl:       $nl:expr,
@@ -113,7 +114,7 @@ macro_rules! theory_stmt {
             body: $($bpred:ident ( $($barg:ident),* )),+ $(,)? ;
             head: $hpred:ident ( $($harg:ident),* ) $(,)? ;
         }
-    }]) => {
+    }) => {
         {
             let mut __var_idx: u32 = 0;
             $(
@@ -148,17 +149,17 @@ macro_rules! theory_stmt {
     };
 
     // ------------------------------------------------------------------
-    // [integrity! { name: ..., implicit: ..., nl: ...,
-    //               forall (...) { body: ...; } }]
+    // integrity! { name: ..., implicit: ..., nl: ...,
+    //              forall (...) { body: ...; } }
     // ------------------------------------------------------------------
-    ($t:ident, [integrity ! {
+    ($t:ident, integrity ! {
         name:     $name:expr,
         implicit: $implicit:expr,
         nl:       $nl:expr,
         forall ($($var:ident : $sort_var:ident),* $(,)?) {
             body: $($bpred:ident ( $($barg:ident),* )),+ $(,)? ;
         }
-    }]) => {
+    }) => {
         {
             let mut __var_idx: u32 = 0;
             $(
@@ -192,29 +193,32 @@ macro_rules! theory_stmt {
 // ---------------------------------------------------------------------------
 // theory! — single-pass, non-recursive dispatcher
 //
-// Accepts a sequence of `[statement]` blocks and expands them in one pass.
-// Each `[...]` is a single token tree, so $($stmt:tt)* matches them without
-// any recursion.  The recursion depth is O(1) regardless of theory size.
+// Each statement is `mac ! args` where `args` is a single token tree
+// (`(...)` for sorts/predicates/functions/constants, `{...}` for axioms).
+// The `$args:tt` fragment keeps the expansion flat: no $($rest:tt)* passing,
+// no recursion regardless of theory size.
 // ---------------------------------------------------------------------------
 
 /// Build a [`Theory`][crate::theories::Theory] from a concise DSL.
 ///
-/// Wrap each statement in `[...]` so that the entire body is matched in a
-/// single non-recursive pass.  Supported statement forms:
+/// Accepts a sequence of `mac!(...)` or `mac!{...}` statements separated by
+/// optional semicolons.  Supported forms:
 ///
 /// | Form | Effect |
 /// |------|--------|
-/// | `[sorts!(S, T, ...)]` | Declare sorts; bind `SortId`s to the identifiers |
-/// | `[predicates!(p(S1, S2), ...)]` | Declare predicate symbols |
-/// | `[functions!(f(S1) -> R, ...)]` | Declare function symbols |
-/// | `[constants!(a, b, ...)]` | Declare 0-ary named constants |
-/// | `[horn! { name: ..., implicit: ..., nl: ..., forall (...) { body: ...; head: ...; } }]` | Horn axiom |
-/// | `[integrity! { name: ..., implicit: ..., nl: ..., forall (...) { body: ...; } }]` | Integrity constraint |
+/// | `sorts!(S, T, ...)` | Declare sorts; bind `SortId`s to the identifiers |
+/// | `predicates!(p(S1, S2), ...)` | Declare predicate symbols |
+/// | `functions!(f(S1) -> R, ...)` | Declare function symbols |
+/// | `constants!(a, b, ...)` | Declare 0-ary named constants |
+/// | `horn! { name: ..., implicit: ..., nl: ..., forall (...) { body: ...; head: ...; } }` | Horn axiom |
+/// | `integrity! { name: ..., implicit: ..., nl: ..., forall (...) { body: ...; } }` | Integrity constraint |
 macro_rules! theory {
-    ($($stmt:tt)*) => {{
+    (
+        $($mac:ident ! $args:tt $(;)?)*
+    ) => {{
         let mut __theory = $crate::theories::Theory::new();
         $(
-            theory_stmt!(__theory, $stmt);
+            theory_stmt!(__theory, $mac ! $args);
         )*
         __theory
     }};

@@ -391,48 +391,48 @@ mod tests {
     #[test]
     fn macro_theory_construction() {
         let t = theory! {
-            [sorts!(Employee, Department)]
+            sorts!(employee, department);
 
-            [predicates!(
-                manages(Employee, Employee),
-                can_fire(Employee, Employee),
-                reports_to(Employee, Employee),
-            )]
+            predicates!(
+                manages(employee, employee),
+                can_fire(employee, employee),
+                reports_to(employee, employee),
+            );
 
-            [functions!(
-                works_in(Employee) -> Department,
-            )]
+            functions!(
+                works_in(employee) -> department,
+            );
 
-            [constants!(alice, bob, engineering)]
+            constants!(alice, bob, engineering);
 
-            [horn! {
+            horn! {
                 name:     "manages_can_fire",
                 implicit: false,
                 nl:       "Managers can fire their direct reports",
-                forall (x: Employee, y: Employee) {
+                forall (x: employee, y: employee) {
                     body: manages(x, y);
                     head: can_fire(x, y);
                 }
-            }]
+            };
 
-            [horn! {
+            horn! {
                 name:     "manages_reports_to",
                 implicit: true,
                 nl:       "If X manages Y then Y reports to X",
-                forall (x: Employee, y: Employee) {
+                forall (x: employee, y: employee) {
                     body: manages(x, y);
                     head: reports_to(y, x);
                 }
-            }]
+            };
 
-            [integrity! {
+            integrity! {
                 name:     "no_self_manage",
                 implicit: true,
                 nl:       "Nobody manages themselves",
-                forall (x: Employee) {
+                forall (x: employee) {
                     body: manages(x, x);
                 }
-            }]
+            };
         };
 
         // Verify sorts, symbols, and axioms were registered.

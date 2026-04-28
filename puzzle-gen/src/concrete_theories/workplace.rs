@@ -28,9 +28,12 @@
 //! let instance = theory.instantiate(domain);
 //! ```
 
-use std::sync::OnceLock;
+use std::{collections::VecDeque, sync::OnceLock};
 
-use crate::theories::Theory;
+use rand::Rng;
+use rand_distr::{Distribution, Poisson};
+
+use crate::theories::{GroundModel, ModelGenerator, Theory};
 
 /// Return a reference to the (lazily initialised) workplace `Theory`.
 ///
@@ -204,6 +207,42 @@ fn build() -> Theory {
     }
 }
 
+/// Generator for ground truth workplace
+struct WorkplaceGenerator<R> {
+    rng: R,
+    offspring_distr: Poisson<f64>,
+    max_depth: usize,
+}
+
+impl<R> WorkplaceGenerator<R> {
+    /// Create a new [`WorkplaceGenerator`], failing if the span of control is
+    /// invalid for a [`Poisson`] distribution.
+    fn try_new(
+        rng: R,
+        span_of_control: f64,
+        max_depth: usize,
+    ) -> Result<Self, rand_distr::PoissonError> {
+        Poisson::new(span_of_control).map(|offspring_distr| Self {
+            rng,
+            offspring_distr,
+            max_depth,
+        })
+    }
+}
+
+impl<R> ModelGenerator for WorkplaceGenerator<R>
+where
+    R: Rng,
+{
+    fn generate(&mut self) -> GroundModel {
+        let mut stack = VecDeque::new();
+        // sample a root node
+        stack.push_back((0, self.offspring_distr.sample(&mut self.rng)));
+        while let Some(supervisor) = stack.pop_front() {}
+        todo!()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -229,8 +268,7 @@ mod tests {
         assert_eq!(implicit.len(), 6);
 
         // Spot-check names
-        let names: std::collections::HashSet<&str> =
-            t.axioms().map(|(_, a)| a.name()).collect();
+        let names: std::collections::HashSet<&str> = t.axioms().map(|(_, a)| a.name()).collect();
         assert!(names.contains("chain_of_command_can_fire"));
         assert!(names.contains("no_self_approve"));
         assert!(names.contains("manages_antisymmetry"));

@@ -234,15 +234,6 @@ pub struct Theory {
     axioms: SlotMap<AxiomId, Axiom>,
 }
 
-/// An instantiated theory: all sorts have concrete domains, plus ground facts
-/// and (optionally) a query.
-pub struct Instance<'t> {
-    theory: &'t Theory,
-    domain: HashMap<SortId, Vec<SymbolId>>, // Sort -> enumerated constants
-    facts: Vec<Atom>,                       // all ground
-    active_axioms: HashSet<AxiomId>,        // for ablation
-}
-
 impl Theory {
     pub fn sorts(&self) -> slotmap::basic::Iter<'_, SortId, SortDecl> {
         self.sorts.iter()
@@ -351,6 +342,25 @@ impl Theory {
     }
 }
 
+/// A ground-truth model of a theory. This is used in generating instances.
+pub struct GroundModel {
+    /// Ground atoms forming the domain of the model.
+    domain: HashMap<SortId, Vec<SymbolId>>,
+    /// Extension of each predicate
+    predicates: HashMap<SymbolId, HashSet<Vec<SymbolId>>>,
+    /// Ground atoms forming the functions of the model.
+    functions: HashMap<SymbolId, HashMap<Vec<SymbolId>, SymbolId>>,
+}
+
+/// An instantiated theory: all sorts have concrete domains, plus ground facts
+/// and (optionally) a query.
+pub struct Instance<'t> {
+    theory: &'t Theory,
+    domain: HashMap<SortId, Vec<SymbolId>>, // Sort -> enumerated constants
+    facts: Vec<Atom>,                       // all ground
+    active_axioms: HashSet<AxiomId>,        // for ablation
+}
+
 impl<'t> Instance<'t> {
     pub fn theory(&self) -> &'t Theory {
         self.theory
@@ -384,10 +394,12 @@ impl<'t> Instance<'t> {
     }
 }
 
+pub trait ModelGenerator {
+    fn generate(&mut self) -> GroundModel;
+}
+
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     /// Smoke-test: build a small workplace theory using the macros and check
     /// that all axiom variants round-trip through the Theory.
     #[test]

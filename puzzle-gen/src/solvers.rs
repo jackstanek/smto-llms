@@ -3,7 +3,9 @@
 
 use crate::theories::{Axiom, Formula, Instance};
 
-mod smt;
+pub mod smt;
+
+pub use smt::SmtBackend;
 
 /// Result of an entailment check.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

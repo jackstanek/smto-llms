@@ -30,10 +30,13 @@
 
 use std::{collections::VecDeque, sync::OnceLock};
 
-use rand::Rng;
+use rand::{Rng, seq::IndexedRandom};
 use rand_distr::{Distribution, Poisson};
 
-use crate::theories::{ConstId, GroundModel, ModelGenerator, SortId, SymbolId, Theory};
+use crate::theories::{
+    Atom, ConstId, Formula, GroundModel, ModelGenerator, QueryGenerator, SortId, SymbolId, Term,
+    Theory,
+};
 
 /// Return a reference to the (lazily initialised) workplace `Theory`.
 ///
@@ -42,6 +45,62 @@ use crate::theories::{ConstId, GroundModel, ModelGenerator, SortId, SymbolId, Th
 pub fn theory() -> &'static Theory {
     static THEORY: OnceLock<Theory> = OnceLock::new();
     THEORY.get_or_init(build)
+}
+
+/// Sampler for workplace puzzle queries.
+///
+/// Picks a uniformly-random ordered pair of distinct employees and a
+/// uniformly-random *derived* authority predicate (`can_fire` or
+/// `can_approve_expense`). Restricted to derived predicates because
+/// non-derived ones (e.g. `manages`) are decided directly by the ground facts
+/// regardless of which axioms remain active, so ablation would have no effect
+/// on them and the puzzle would not exercise the implicit theory.
+pub struct WorkplaceQueryGenerator<R> {
+    rng: R,
+}
+
+impl<R> WorkplaceQueryGenerator<R> {
+    pub fn new(rng: R) -> Self {
+        Self { rng }
+    }
+}
+
+impl<R> QueryGenerator<'static> for WorkplaceQueryGenerator<R>
+where
+    R: Rng,
+{
+    fn generate(&mut self, model: &GroundModel<'static>) -> Formula {
+        let t = model.theory();
+        let employee_sort = find_sort(t, "employee");
+        let employees = model
+            .domain()
+            .get(&employee_sort)
+            .expect("workplace model has no employees");
+        assert!(
+            employees.len() >= 2,
+            "workplace query needs at least 2 employees"
+        );
+
+        let predicates = [
+            find_symbol(t, "can_fire"),
+            find_symbol(t, "can_approve_expense"),
+        ];
+        let predicate = *predicates.choose(&mut self.rng).unwrap();
+
+        // Pick two distinct employees.
+        let p = *employees.choose(&mut self.rng).unwrap();
+        let q = loop {
+            let candidate = *employees.choose(&mut self.rng).unwrap();
+            if candidate != p {
+                break candidate;
+            }
+        };
+
+        Formula::Atom(Atom::Predicate {
+            symbol: predicate,
+            args: vec![Term::DomainConst(p), Term::DomainConst(q)],
+        })
+    }
 }
 
 /// Construct the workplace `Theory`.  Called at most once by [`theory`].
@@ -210,7 +269,7 @@ fn build() -> Theory {
 }
 
 /// Generator for ground truth workplace hierarchies.
-struct WorkplaceGenerator<R> {
+pub struct WorkplaceGenerator<R> {
     rng: R,
     offspring_distr: Poisson<f64>,
     max_depth: usize,
@@ -220,7 +279,7 @@ struct WorkplaceGenerator<R> {
 impl<R> WorkplaceGenerator<R> {
     /// Create a new [`WorkplaceGenerator`], failing if the span of control is
     /// invalid for a [`Poisson`] distribution.
-    fn try_new(
+    pub fn try_new(
         rng: R,
         span_of_control: f64,
         max_depth: usize,

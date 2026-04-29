@@ -274,6 +274,12 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
     type Error = smtlib::Error;
 
     fn load_instance(&mut self, instance: &Instance<'_>) -> Result<(), Self::Error> {
+        // NOTE: This currently performs a full clear-and-reload of the solver
+        // state on every call, which is non-optimal: the puzzle-generation loop
+        // calls this once per ablation step, re-translating every fact and
+        // axiom each time. A future revision should keep a long-lived solver
+        // session and use push/pop scopes (or incremental assert/retract of
+        // axioms) so that only the changed pieces are sent to the solver.
         let theory = instance.theory();
 
         self.smt_sorts.clear();

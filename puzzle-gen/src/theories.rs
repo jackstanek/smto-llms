@@ -497,6 +497,10 @@ impl<'t> Instance<'t> {
         }
     }
 
+    pub fn theory(&self) -> &'t Theory {
+        self.theory
+    }
+
     pub fn constants(&self) -> &SlotMap<ConstId, ConstDecl> {
         &self.constants
     }
@@ -586,6 +590,16 @@ impl AblationStrategy for StochasticAblation {
 /// Interface for generating models of a given theory.
 pub trait ModelGenerator<'t> {
     fn generate(&mut self) -> GroundModel<'t>;
+}
+
+/// Interface for generating queries against a given ground model.
+///
+/// The query is a `Formula` whose entailment under the model's theory will be
+/// tested by the puzzle-generation loop. Implementations should pick queries
+/// that exercise the *implicit* axioms of the theory; otherwise ablation will
+/// not change the entailment status and the puzzle will not be interesting.
+pub trait QueryGenerator<'t> {
+    fn generate(&mut self, model: &GroundModel<'t>) -> Formula;
 }
 
 #[cfg(test)]

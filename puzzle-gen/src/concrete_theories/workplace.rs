@@ -33,7 +33,7 @@ use std::{collections::VecDeque, sync::OnceLock};
 use rand::Rng;
 use rand_distr::{Distribution, Poisson};
 
-use crate::theories::{GroundModel, ModelGenerator, Theory};
+use crate::theories::{ConstId, GroundModel, ModelGenerator, SortId, SymbolId, Theory};
 
 /// Return a reference to the (lazily initialised) workplace `Theory`.
 ///
@@ -54,7 +54,7 @@ fn build() -> Theory {
 
         // ------------------------------------------------------------------
         // Structural functions
-        // Every employee works in exactly one department.
+        // Every employee works in at most one department.
         // (Axioms involving function terms are not yet expressed here; the
         //  function is declared for use by Instance-level SMT translation.)
         // ------------------------------------------------------------------
@@ -207,11 +207,12 @@ fn build() -> Theory {
     }
 }
 
-/// Generator for ground truth workplace
+/// Generator for ground truth workplace hierarchies.
 struct WorkplaceGenerator<R> {
     rng: R,
     offspring_distr: Poisson<f64>,
     max_depth: usize,
+    n_departments: usize,
 }
 
 impl<R> WorkplaceGenerator<R> {
@@ -221,25 +222,75 @@ impl<R> WorkplaceGenerator<R> {
         rng: R,
         span_of_control: f64,
         max_depth: usize,
+        n_departments: usize,
     ) -> Result<Self, rand_distr::PoissonError> {
         Poisson::new(span_of_control).map(|offspring_distr| Self {
             rng,
             offspring_distr,
             max_depth,
+            n_departments,
         })
     }
 }
 
-impl<R> ModelGenerator for WorkplaceGenerator<R>
+fn find_sort(t: &Theory, name: &str) -> SortId {
+    t.sorts()
+        .find(|(_, s)| s.name() == name)
+        .map(|(id, _)| id)
+        .unwrap_or_else(|| panic!("workplace theory missing sort `{name}`"))
+}
+
+fn find_symbol(t: &Theory, name: &str) -> SymbolId {
+    t.symbols()
+        .find(|(_, s)| s.name() == name)
+        .map(|(id, _)| id)
+        .unwrap_or_else(|| panic!("workplace theory missing symbol `{name}`"))
+}
+
+impl<R> ModelGenerator<'static> for WorkplaceGenerator<R>
 where
     R: Rng,
 {
-    fn generate(&mut self) -> GroundModel {
-        let mut stack = VecDeque::new();
-        // sample a root node
-        stack.push_back((0, self.offspring_distr.sample(&mut self.rng)));
-        while let Some(supervisor) = stack.pop_front() {}
-        todo!()
+    fn generate(&mut self) -> GroundModel<'static> {
+        let t = theory();
+        let employee_sort = find_sort(t, "employee");
+        let department_sort = find_sort(t, "department");
+        let manages_sym = find_symbol(t, "manages");
+        let works_in_sym = find_symbol(t, "works_in");
+
+        let mut model = GroundModel::new(t);
+
+        let departments: Vec<ConstId> = (0..self.n_departments)
+            .map(|i| model.add_constant(format!("dept_{i}"), department_sort))
+            .collect();
+
+        let ceo = model.add_constant("ceo", employee_sort);
+
+        // BFS frontier: (manager, depth, department).
+        let mut frontier: VecDeque<(ConstId, usize, ConstId)> = VecDeque::new();
+        for (i, &dept) in departments.iter().enumerate() {
+            let head = model.add_constant(format!("head_{i}"), employee_sort);
+            model.add_predicate_fact(manages_sym, vec![ceo, head]);
+            model.add_function_fact(works_in_sym, vec![head], dept);
+            frontier.push_back((head, 1, dept));
+        }
+
+        let mut next_id: usize = 0;
+        while let Some((parent, depth, dept)) = frontier.pop_front() {
+            if depth >= self.max_depth {
+                continue;
+            }
+            let n_children = self.offspring_distr.sample(&mut self.rng) as usize;
+            for _ in 0..n_children {
+                let child = model.add_constant(format!("emp_{next_id}"), employee_sort);
+                next_id += 1;
+                model.add_predicate_fact(manages_sym, vec![parent, child]);
+                model.add_function_fact(works_in_sym, vec![child], dept);
+                frontier.push_back((child, depth + 1, dept));
+            }
+        }
+
+        model
     }
 }
 

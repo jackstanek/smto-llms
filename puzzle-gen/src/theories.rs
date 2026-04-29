@@ -2,8 +2,8 @@
 //! framework allows building up a general theory which can be instantiated with
 //! different models.
 
+use log::info;
 use std::collections::{HashMap, HashSet};
-
 use slotmap::{SlotMap, new_key_type};
 
 new_key_type! {
@@ -16,6 +16,30 @@ new_key_type! {
     /// Identifiers for axioms
     pub struct AxiomId;
 
+    /// Identifiers for domain constants in a `GroundModel` / `Instance`.
+    ///
+    /// Distinct from `SymbolId` so the keyspace of theory-declared symbols
+    /// (sorts, predicates, functions, theory-level constants) cannot be
+    /// accidentally mixed with the keyspace of model domain elements.
+    pub struct ConstId;
+}
+
+/// Declaration of a domain constant: its (display) name and the sort it
+/// inhabits.
+#[derive(Debug, Clone)]
+pub struct ConstDecl {
+    name: String,
+    sort: SortId,
+}
+
+impl ConstDecl {
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn sort(&self) -> SortId {
+        self.sort
+    }
 }
 
 /// Identifiers for variables
@@ -97,8 +121,10 @@ impl Signature {
 pub enum Term {
     /// Variable reference
     Var(VarId),
-    /// Constant denoted by a symbol
+    /// Theory-level constant (declared in the `Theory` itself).
     Const(SymbolId),
+    /// Domain constant from a `GroundModel` / `Instance`.
+    DomainConst(ConstId),
     /// Function application for n-ary functions.
     App { symbol: SymbolId, args: Vec<Term> },
 }
@@ -257,6 +283,7 @@ impl Theory {
 
     /// Construct a new empty theory.
     pub fn new() -> Self {
+        info!("creating new empty theory");
         Self {
             name: None,
             sorts: SlotMap::with_key(),
@@ -267,8 +294,10 @@ impl Theory {
 
     /// Construct a new empty theory with the given name.
     pub fn new_named(name: impl Into<String>) -> Self {
+        let name = name.into();
+        info!("creating new theory: {}", name);
         Self {
-            name: Some(name.into()),
+            name: Some(name),
             sorts: SlotMap::with_key(),
             symbols: SlotMap::with_key(),
             axioms: SlotMap::with_key(),
@@ -330,43 +359,151 @@ impl Theory {
         })
     }
 
-    /// Instantiate the theory with the given finite domain.
-    pub fn instantiate(&self, domain: HashMap<SortId, Vec<SymbolId>>) -> Instance<'_> {
-        let active_axioms = self.axioms.iter().map(|(id, _)| id).collect::<HashSet<_>>();
-        Instance {
-            theory: self,
-            domain,
-            facts: Vec::new(),
-            active_axioms,
+}
+
+/// A ground-truth model of a theory: the theory schema plus a concrete domain
+/// of constants and the extensions of each predicate / function.
+///
+/// `GroundModel` borrows the theory it interprets, so all `SortId` and
+/// `SymbolId` values used in the maps below refer to the same theory's arenas
+/// — there is no separate keyspace to reconcile.
+pub struct GroundModel<'t> {
+    theory: &'t Theory,
+    constants: SlotMap<ConstId, ConstDecl>,
+    domain: HashMap<SortId, Vec<ConstId>>,
+    predicates: HashMap<SymbolId, HashSet<Vec<ConstId>>>,
+    functions: HashMap<SymbolId, HashMap<Vec<ConstId>, ConstId>>,
+}
+
+impl<'t> GroundModel<'t> {
+    pub fn new(theory: &'t Theory) -> Self {
+        Self {
+            theory,
+            constants: SlotMap::with_key(),
+            domain: HashMap::new(),
+            predicates: HashMap::new(),
+            functions: HashMap::new(),
         }
     }
-}
 
-/// A ground-truth model of a theory. This is used in generating instances.
-pub struct GroundModel {
-    /// Ground atoms forming the domain of the model.
-    domain: HashMap<SortId, Vec<SymbolId>>,
-    /// Extension of each predicate
-    predicates: HashMap<SymbolId, HashSet<Vec<SymbolId>>>,
-    /// Ground atoms forming the functions of the model.
-    functions: HashMap<SymbolId, HashMap<Vec<SymbolId>, SymbolId>>,
-}
-
-/// An instantiated theory: all sorts have concrete domains, plus ground facts
-/// and (optionally) a query.
-pub struct Instance<'t> {
-    theory: &'t Theory,
-    domain: HashMap<SortId, Vec<SymbolId>>, // Sort -> enumerated constants
-    facts: Vec<Atom>,                       // all ground
-    active_axioms: HashSet<AxiomId>,        // for ablation
-}
-
-impl<'t> Instance<'t> {
     pub fn theory(&self) -> &'t Theory {
         self.theory
     }
 
-    pub fn domain(&self) -> &HashMap<SortId, Vec<SymbolId>> {
+    pub fn constants(&self) -> &SlotMap<ConstId, ConstDecl> {
+        &self.constants
+    }
+
+    pub fn constant(&self, id: ConstId) -> &ConstDecl {
+        &self.constants[id]
+    }
+
+    pub fn domain(&self) -> &HashMap<SortId, Vec<ConstId>> {
+        &self.domain
+    }
+
+    pub fn predicates(&self) -> &HashMap<SymbolId, HashSet<Vec<ConstId>>> {
+        &self.predicates
+    }
+
+    pub fn functions(&self) -> &HashMap<SymbolId, HashMap<Vec<ConstId>, ConstId>> {
+        &self.functions
+    }
+
+    /// Add a domain constant of the given sort and return its `ConstId`.
+    pub fn add_constant(&mut self, name: impl Into<String>, sort: SortId) -> ConstId {
+        let id = self.constants.insert(ConstDecl {
+            name: name.into(),
+            sort,
+        });
+        self.domain.entry(sort).or_default().push(id);
+        id
+    }
+
+    /// Record a ground predicate fact `p(args)`.
+    pub fn add_predicate_fact(&mut self, predicate: SymbolId, args: Vec<ConstId>) {
+        self.predicates.entry(predicate).or_default().insert(args);
+    }
+
+    /// Record a ground function fact `f(args) = value`.
+    pub fn add_function_fact(&mut self, function: SymbolId, args: Vec<ConstId>, value: ConstId) {
+        self.functions.entry(function).or_default().insert(args, value);
+    }
+}
+
+/// An instantiated theory: a `GroundModel` materialised as ground `Atom` facts,
+/// plus an ablatable axiom set.
+///
+/// Constructed from a `GroundModel` via [`Instance::from_ground_model`] so that
+/// the theory reference and the domain constant registry are shared by
+/// construction.
+pub struct Instance<'t> {
+    theory: &'t Theory,
+    constants: SlotMap<ConstId, ConstDecl>,
+    domain: HashMap<SortId, Vec<ConstId>>,
+    facts: Vec<Atom>,
+    active_axioms: HashSet<AxiomId>,
+}
+
+impl<'t> Instance<'t> {
+    /// Materialise a `GroundModel` into an `Instance` with all axioms active.
+    ///
+    /// Predicate extensions become `Atom::Predicate` facts; function
+    /// extensions become `Atom::Eq(App(f, args), value)` facts.
+    pub fn from_ground_model(model: GroundModel<'t>) -> Self {
+        let GroundModel {
+            theory,
+            constants,
+            domain,
+            predicates,
+            functions,
+        } = model;
+
+        let mut facts = Vec::new();
+        for (symbol, tuples) in &predicates {
+            for args in tuples {
+                facts.push(Atom::Predicate {
+                    symbol: *symbol,
+                    args: args.iter().map(|c| Term::DomainConst(*c)).collect(),
+                });
+            }
+        }
+        for (symbol, map) in &functions {
+            for (args, value) in map {
+                facts.push(Atom::Eq(
+                    Term::App {
+                        symbol: *symbol,
+                        args: args.iter().map(|c| Term::DomainConst(*c)).collect(),
+                    },
+                    Term::DomainConst(*value),
+                ));
+            }
+        }
+
+        let active_axioms = theory.axioms.iter().map(|(id, _)| id).collect();
+
+        Self {
+            theory,
+            constants,
+            domain,
+            facts,
+            active_axioms,
+        }
+    }
+
+    pub fn theory(&self) -> &'t Theory {
+        self.theory
+    }
+
+    pub fn constants(&self) -> &SlotMap<ConstId, ConstDecl> {
+        &self.constants
+    }
+
+    pub fn constant(&self, id: ConstId) -> &ConstDecl {
+        &self.constants[id]
+    }
+
+    pub fn domain(&self) -> &HashMap<SortId, Vec<ConstId>> {
         &self.domain
     }
 
@@ -394,8 +531,8 @@ impl<'t> Instance<'t> {
     }
 }
 
-pub trait ModelGenerator {
-    fn generate(&mut self) -> GroundModel;
+pub trait ModelGenerator<'t> {
+    fn generate(&mut self) -> GroundModel<'t>;
 }
 
 #[cfg(test)]

@@ -8,7 +8,9 @@ use smtlib::lowlevel::lexicon::Symbol;
 use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 
 use crate::solvers::{Backend, QueryResult};
-use crate::theories::{Atom, Axiom, AxiomBody, Formula, Instance, SortId, SymbolId, Term, VarId};
+use crate::theories::{
+    Atom, Axiom, AxiomBody, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
+};
 
 /// Backend over SMT-LIB compatible solvers.
 ///
@@ -21,6 +23,7 @@ pub struct SmtBackend<'st, B: smtlib::Backend> {
     // Translation state, populated during load_instance.
     smt_sorts: HashMap<SortId, smtlib::sorts::Sort<'st>>,
     smt_consts: HashMap<SymbolId, Dynamic<'st>>,
+    smt_domain_consts: HashMap<ConstId, Dynamic<'st>>,
     smt_fun_names: HashMap<SymbolId, &'st str>,
     smt_fun_ret_sorts: HashMap<SymbolId, smtlib::sorts::Sort<'st>>,
 }
@@ -33,6 +36,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             solver,
             smt_sorts: HashMap::new(),
             smt_consts: HashMap::new(),
+            smt_domain_consts: HashMap::new(),
             smt_fun_names: HashMap::new(),
             smt_fun_ret_sorts: HashMap::new(),
         })
@@ -60,6 +64,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         match term {
             Term::Var(v) => var_map[v],
             Term::Const(sym) => self.smt_consts[sym],
+            Term::DomainConst(c) => self.smt_domain_consts[c],
             Term::App { symbol, args } => {
                 let name = self.smt_fun_names[symbol];
                 let arg_terms: Vec<&'st ast::Term<'st>> = args
@@ -273,6 +278,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
 
         self.smt_sorts.clear();
         self.smt_consts.clear();
+        self.smt_domain_consts.clear();
         self.smt_fun_names.clear();
         self.smt_fun_ret_sorts.clear();
 
@@ -294,11 +300,11 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             let sort = self.smt_sorts[sort_id];
             let mut const_dynamics: Vec<Dynamic<'st>> = Vec::new();
 
-            for &sym_id in constants {
-                let name = theory.symbol(sym_id).name();
+            for &const_id in constants {
+                let name = self.st.alloc_str(instance.constant(const_id).name());
                 let c = sort.new_const(self.st, name);
                 let dynamic: Dynamic<'st> = c.into();
-                self.smt_consts.insert(sym_id, dynamic);
+                self.smt_domain_consts.insert(const_id, dynamic);
                 const_dynamics.push(dynamic);
             }
 

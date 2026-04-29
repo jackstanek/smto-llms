@@ -2,9 +2,11 @@
 
 use std::collections::HashMap;
 
-use smtlib::Storage;
-use smtlib::lowlevel::ast;
-use smtlib::lowlevel::lexicon::Symbol;
+use log::{error, trace};
+use smtlib::lowlevel::{
+    ast::{self},
+    lexicon::{self},
+};
 use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 
 use crate::solvers::{Backend, QueryResult};
@@ -12,13 +14,66 @@ use crate::theories::{
     Atom, Axiom, AxiomBody, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
 };
 
+/// Create a non-standard option with an optional argument.
+fn make_option<'st>(name: &'st str, arg: Option<&'st str>) -> smtlib::lowlevel::ast::Option<'st> {
+    let kw = lexicon::Keyword(name);
+    match arg {
+        Some(sym) => ast::Option::Attribute(ast::Attribute::WithValue(
+            kw,
+            ast::AttributeValue::Symbol(lexicon::Symbol(sym)),
+        )),
+        None => ast::Option::Attribute(ast::Attribute::Keyword(kw)),
+    }
+}
+
+/// Set an option for the solver.
+fn set_option<'st, B: smtlib::Backend>(
+    solver: &mut smtlib::Solver<'st, B>,
+    option: smtlib::lowlevel::ast::Option<'st>,
+) -> Result<smtlib::lowlevel::ast::GeneralResponse<'st>, smtlib::Error> {
+    let cmd = ast::Command::SetOption(option);
+    solver.run_command(cmd)
+}
+
+/// Configure the SMT solver backend for use with model finding. Specifically,
+/// it sets the correct logic and solver options.
+///
+/// TODO: This is tested against CVC5, it shouldn't be expected to work with Z3
+/// out-of-the-box. In particular, we rely on CVC5's finite model finding
+/// capabilities.
+fn configure_solver<'st, B: smtlib::Backend>(
+    solver: &mut smtlib::Solver<'st, B>,
+) -> Result<(), smtlib::Error> {
+    use smtlib::lowlevel::ast::Option;
+    // enable model production and unsat core
+    set_option(solver, Option::ProduceModels(true))?;
+    trace!("set produce-models true");
+    set_option(solver, Option::ProduceUnsatCores(true))?;
+    trace!("set produce-unsat-cores true");
+
+    // enable finite model finder (probably CVC5-specific, so swallow errors if
+    // unsupported.)
+    let finite_model_find = make_option("finite-model-find", Some("true"));
+    if let Err(err) = set_option(solver, finite_model_find) {
+        error!("error: {err:?}");
+        return Err(err);
+    }
+    trace!("set finite-model-find true");
+
+    // set the logic to UFDT (uninterpreted functions with algebraic data types)
+    // let logic_ufdt = smtlib::Logic::Custom("UFDT".to_string());
+    // solver.set_logic(logic_ufdt)?;
+    // trace!("set logic to UFDT");
+    Ok(())
+}
+
 /// Backend over SMT-LIB compatible solvers.
 ///
 /// The `Storage` must outlive the backend; the caller owns it and passes a
 /// reference in at construction time, which avoids the self-referential
 /// lifetime problem (Solver borrows Storage).
 pub struct SmtBackend<'st, B: smtlib::Backend> {
-    st: &'st Storage,
+    st: &'st smtlib::Storage,
     solver: smtlib::Solver<'st, B>,
     // Translation state, populated during load_instance.
     smt_sorts: HashMap<SortId, smtlib::sorts::Sort<'st>>,
@@ -29,8 +84,11 @@ pub struct SmtBackend<'st, B: smtlib::Backend> {
 }
 
 impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
-    pub fn new(st: &'st Storage, backend: B) -> Result<Self, smtlib::Error> {
-        let solver = smtlib::Solver::new(st, backend)?;
+    pub fn new(st: &'st smtlib::Storage, backend: B) -> Result<Self, smtlib::Error> {
+        let mut solver = smtlib::Solver::new(st, backend)?;
+        trace!("constructed solver");
+        configure_solver(&mut solver)?;
+        trace!("configured solver");
         Ok(Self {
             st,
             solver,
@@ -42,11 +100,9 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         })
     }
 
-    // -- Private translation helpers ----------------------------------------
-
     /// Build an SMT-LIB function/predicate application term.
     fn smt_app(&self, name: &'st str, args: &[&'st ast::Term<'st>]) -> ast::Term<'st> {
-        let qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(Symbol(name)));
+        let qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
         if args.is_empty() {
             ast::Term::Identifier(qi)
         } else {
@@ -216,11 +272,13 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             let var_name = self.st.alloc_str(&format!("_v{}", var_id.0));
             let sort = self.smt_sorts[&sort_id];
 
-            sorted.push(ast::SortedVar(Symbol(var_name), sort.ast()));
+            sorted.push(ast::SortedVar(lexicon::Symbol(var_name), sort.ast()));
 
             // Build a term that references this quantified variable.
-            let qi =
-                ast::QualIdentifier::Sorted(ast::Identifier::Simple(Symbol(var_name)), sort.ast());
+            let qi = ast::QualIdentifier::Sorted(
+                ast::Identifier::Simple(lexicon::Symbol(var_name)),
+                sort.ast(),
+            );
             let dynamic =
                 Dynamic::from_term_sort(STerm::new(self.st, ast::Term::Identifier(qi)), sort);
             map.insert(var_id, dynamic);
@@ -274,6 +332,8 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
     type Error = smtlib::Error;
 
     fn load_instance(&mut self, instance: &Instance<'_>) -> Result<(), Self::Error> {
+        trace!("loading instance");
+
         // NOTE: This currently performs a full clear-and-reload of the solver
         // state on every call, which is non-optimal: the puzzle-generation loop
         // calls this once per ablation step, re-translating every fact and
@@ -288,6 +348,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         self.smt_fun_names.clear();
         self.smt_fun_ret_sorts.clear();
 
+        trace!("loading sorts");
         // 1. Register sorts (actual declaration happens when first used by
         //    declare_fun / declare_const inside the solver).
         for (id, decl) in theory.sorts() {
@@ -301,6 +362,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             self.smt_sorts.insert(id, sort);
         }
 
+        trace!("loading consts");
         // 2. Declare domain constants and assert distinctness per sort.
         for (sort_id, constants) in instance.domain() {
             let sort = self.smt_sorts[sort_id];
@@ -342,6 +404,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         }
 
         // 4. Assert ground facts.
+        trace!("asserting ground facts");
         let empty_var_map = HashMap::new();
         for fact in instance.facts() {
             let b = self.translate_atom(fact, &empty_var_map);
@@ -349,6 +412,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         }
 
         // 5. Assert active axioms.
+        trace!("asserting active axioms");
         for &axiom_id in instance.active_axioms() {
             let axiom = theory.axiom(axiom_id);
             let b = self.translate_axiom(axiom);
@@ -364,6 +428,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
     }
 
     fn check_entailment(&mut self, query: &Formula) -> Result<QueryResult, Self::Error> {
+        trace!("starting entailment check");
         let q = self.translate_formula(query, &HashMap::new());
 
         // T union F union {not q} unsat  =>  q is entailed.

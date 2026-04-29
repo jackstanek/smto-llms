@@ -2,7 +2,7 @@ use std::ops::ControlFlow;
 
 use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
-use log::{Level, debug, info, warn};
+use log::{Level, debug, info, trace, warn};
 use rand::SeedableRng;
 use smtlib::Storage;
 use smtlib::backend::cvc5_binary::Cvc5Binary;
@@ -104,12 +104,14 @@ fn main() -> anyhow::Result<()> {
 
     // 3. Materialise the model as an Instance with all axioms active.
     let mut instance = Instance::from_ground_model(model);
+    trace!("initialized instance");
 
     // 4. Set up the SMT backend.
     let storage = Storage::new();
     let cvc5 = Cvc5Binary::new(&args.cvc5)
         .with_context(|| format!("failed to spawn cvc5 at `{}`", args.cvc5))?;
     let mut backend = SmtBackend::new(&storage, cvc5).context("failed to construct SMT backend")?;
+    trace!("initialized backend");
 
     // 5. Sanity-check: with the full theory the query must be uniquely decided.
     backend

@@ -3,8 +3,12 @@
 //! different models.
 
 use log::info;
-use std::collections::{HashMap, HashSet};
+use rand::{Rng, seq::SliceRandom};
 use slotmap::{SlotMap, new_key_type};
+use std::{
+    collections::{HashMap, HashSet},
+    ops::ControlFlow,
+};
 
 new_key_type! {
     /// Identifiers for sorts
@@ -358,7 +362,6 @@ impl Theory {
             body,
         })
     }
-
 }
 
 /// A ground-truth model of a theory: the theory schema plus a concrete domain
@@ -427,7 +430,10 @@ impl<'t> GroundModel<'t> {
 
     /// Record a ground function fact `f(args) = value`.
     pub fn add_function_fact(&mut self, function: SymbolId, args: Vec<ConstId>, value: ConstId) {
-        self.functions.entry(function).or_default().insert(args, value);
+        self.functions
+            .entry(function)
+            .or_default()
+            .insert(args, value);
     }
 }
 
@@ -491,10 +497,6 @@ impl<'t> Instance<'t> {
         }
     }
 
-    pub fn theory(&self) -> &'t Theory {
-        self.theory
-    }
-
     pub fn constants(&self) -> &SlotMap<ConstId, ConstDecl> {
         &self.constants
     }
@@ -531,6 +533,57 @@ impl<'t> Instance<'t> {
     }
 }
 
+/// Strategies for ablating axioms from theories during puzzle generation.
+pub trait AblationStrategy {
+    /// Perform a single ablation step. If ablation can continue, return `ControlFlow::Continue`.
+    /// If ablation is done, return `ControlFlow::Break`.
+    fn ablate(&mut self, theory: &mut Instance) -> ControlFlow<()>;
+}
+
+/// Ablate all implicit by default axioms at once.
+pub struct AllAtOnceAblation;
+impl AblationStrategy for AllAtOnceAblation {
+    fn ablate(&mut self, inst: &mut Instance) -> ControlFlow<()> {
+        for (id, axiom) in inst.theory.axioms() {
+            if axiom.implicit_by_default() {
+                inst.deactivate_axiom(id);
+            }
+        }
+        ControlFlow::Break(())
+    }
+}
+
+/// Randomly ablate implicit axioms one-at-a-time.
+pub struct StochasticAblation {
+    default_axioms_remaining: Vec<AxiomId>,
+}
+
+impl StochasticAblation {
+    pub fn new(theory: &Theory, rng: &mut impl Rng) -> Self {
+        let mut default_axioms_remaining = theory
+            .axioms()
+            .filter(|(_, axiom)| axiom.implicit_by_default())
+            .map(|(id, _)| id)
+            .collect::<Vec<_>>();
+        default_axioms_remaining.shuffle(rng);
+        Self {
+            default_axioms_remaining,
+        }
+    }
+}
+
+impl AblationStrategy for StochasticAblation {
+    fn ablate(&mut self, inst: &mut Instance) -> ControlFlow<()> {
+        if let Some(next) = self.default_axioms_remaining.pop() {
+            inst.deactivate_axiom(next);
+            ControlFlow::Continue(())
+        } else {
+            ControlFlow::Break(())
+        }
+    }
+}
+
+/// Interface for generating models of a given theory.
 pub trait ModelGenerator<'t> {
     fn generate(&mut self) -> GroundModel<'t>;
 }

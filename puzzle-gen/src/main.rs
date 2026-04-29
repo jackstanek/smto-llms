@@ -30,7 +30,6 @@ fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     logger_setup(&args.log_level)?;
     info!("puzzle-gen started");
-    debug!("{:?}", &args);
 
     info!("exiting");
     Ok(())

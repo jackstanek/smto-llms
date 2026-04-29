@@ -31,9 +31,9 @@ enum AblationKind {
 #[derive(Parser, Debug)]
 #[command(version)]
 pub struct Args {
-    /// Log level
-    #[arg(long, default_value_t = Level::Info)]
-    log_level: Level,
+    /// Log level (overrides RUST_LOG when set)
+    #[arg(long)]
+    log_level: Option<Level>,
 
     /// Ablation strategy.
     #[arg(long, value_enum, default_value_t = AblationKind::Stochastic)]
@@ -60,16 +60,22 @@ pub struct Args {
     cvc5: String,
 }
 
-fn logger_setup(level: &Level) -> anyhow::Result<()> {
-    env_logger::builder()
-        .filter_level(level.to_level_filter())
-        .try_init()
-        .context("couldn't initialize logger")
+fn logger_setup(level: Option<Level>) -> anyhow::Result<()> {
+    let mut builder = env_logger::Builder::new();
+    // RUST_LOG as base layer
+    builder.parse_default_env();
+    // --log-level overrides RUST_LOG; if neither is set, default to Info
+    match level {
+        Some(l) => builder.filter_level(l.to_level_filter()),
+        None if std::env::var("RUST_LOG").is_err() => builder.filter_level(log::LevelFilter::Info),
+        None => &mut builder,
+    };
+    builder.try_init().context("couldn't initialize logger")
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
-    logger_setup(&args.log_level)?;
+    logger_setup(args.log_level)?;
     info!("puzzle-gen started");
     debug!("{:?}", &args);
 
@@ -82,7 +88,7 @@ fn main() -> anyhow::Result<()> {
         args.max_depth,
         args.n_departments,
     )
-    .map_err(|e| anyhow!("invalid Poisson distribution: {e}"))?;
+    .context("invalid Poisson distribution")?;
     let model = model_gen.generate();
     info!(
         "generated model: {} employees, {} departments",

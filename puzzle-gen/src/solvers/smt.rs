@@ -11,8 +11,8 @@ use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 
 use crate::solvers::{Backend, QueryResult};
 use crate::theories::{
-    Atom, Axiom, AxiomBody, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
-    body_holds, enumerate_bindings, eval_term,
+    Atom, Axiom, AxiomBody, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId, body_holds,
+    enumerate_bindings, eval_term,
 };
 
 /// Set an option for the solver.

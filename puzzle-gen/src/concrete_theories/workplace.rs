@@ -28,10 +28,7 @@
 //! let instance = theory.instantiate(domain);
 //! ```
 
-use std::{
-    collections::VecDeque,
-    sync::OnceLock,
-};
+use std::{collections::VecDeque, sync::OnceLock};
 
 use rand::{Rng, seq::IndexedRandom};
 use rand_distr::{Distribution, Poisson};
@@ -82,7 +79,10 @@ where
         let derived: Vec<(SymbolId, ConstId, ConstId)> = lfp
             .iter()
             .filter_map(|(sym, args)| {
-                if (*sym == can_fire_sym || *sym == can_approve_sym) && args.len() == 2 && args[0] != args[1] {
+                if (*sym == can_fire_sym || *sym == can_approve_sym)
+                    && args.len() == 2
+                    && args[0] != args[1]
+                {
                     Some((*sym, args[0], args[1]))
                 } else {
                     None
@@ -138,7 +138,7 @@ fn build() -> Theory {
         // ------------------------------------------------------------------
         horn! {
             name:     "direct_manager_can_fire",
-            implicit: false,
+            implicit: true,
             nl:       "Direct managers can fire their reports",
             forall (p: employee, q: employee) {
                 body: manages(p, q);
@@ -167,7 +167,7 @@ fn build() -> Theory {
         // ------------------------------------------------------------------
         horn! {
             name:     "direct_manager_can_approve",
-            implicit: false,
+            implicit: true,
             nl:       "Direct managers can approve their reports' expenses",
             forall (p: employee, q: employee) {
                 body: manages(p, q);
@@ -187,8 +187,6 @@ fn build() -> Theory {
                 head: can_approve_expense(p, q);
             }
         };
-
-        // A5.
 
         // ------------------------------------------------------------------
         // C1. Act coherence: firing implies authority.

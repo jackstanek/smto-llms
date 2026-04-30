@@ -2,13 +2,15 @@
 //! framework allows building up a general theory which can be instantiated with
 //! different models.
 
-use log::info;
-use rand::{Rng, seq::SliceRandom};
-use slotmap::{SlotMap, new_key_type};
 use std::{
     collections::{HashMap, HashSet},
     ops::ControlFlow,
 };
+
+use itertools::{Either, Itertools};
+use log::info;
+use rand::{Rng, seq::SliceRandom};
+use slotmap::{SlotMap, new_key_type};
 
 new_key_type! {
     /// Identifiers for sorts
@@ -418,8 +420,6 @@ pub(crate) fn enumerate_bindings(
     })
 }
 
-// ---------------------------------------------------------------------------
-
 /// A ground-truth model of a theory: the theory schema plus a concrete domain
 /// of constants and the extensions of each predicate / function.
 ///
@@ -656,27 +656,38 @@ impl AblationStrategy for AllAtOnceAblation {
 
 /// Randomly ablate implicit axioms one-at-a-time.
 pub struct StochasticAblation {
-    default_axioms_remaining: Vec<AxiomId>,
+    implicit_axioms_remaining: Vec<AxiomId>,
+    explicit_axioms: Vec<AxiomId>,
 }
 
 impl StochasticAblation {
     pub fn new(theory: &Theory, rng: &mut impl Rng) -> Self {
-        let mut default_axioms_remaining = theory
-            .axioms()
-            .filter(|(_, axiom)| axiom.implicit_by_default())
-            .map(|(id, _)| id)
-            .collect::<Vec<_>>();
-        default_axioms_remaining.shuffle(rng);
+        let (mut implicit_axioms_remaining, mut explicit_axioms): (Vec<AxiomId>, Vec<AxiomId>) =
+            theory.axioms().partition_map(|(id, axiom)| {
+                axiom
+                    .implicit_by_default()
+                    .then(|| Either::Left(id))
+                    .unwrap_or(Either::Right(id))
+            });
+        implicit_axioms_remaining.shuffle(rng);
+        explicit_axioms.shuffle(rng);
         Self {
-            default_axioms_remaining,
+            implicit_axioms_remaining,
+            explicit_axioms,
         }
     }
 }
 
 impl AblationStrategy for StochasticAblation {
     fn ablate(&mut self, inst: &mut Instance) -> ControlFlow<()> {
-        if let Some(next) = self.default_axioms_remaining.pop() {
-            inst.deactivate_axiom(next);
+        // Deactivate the implicit axioms first. If they're all gone, start
+        // removing explicit axioms until we break the puzzle.
+        let ax = self
+            .implicit_axioms_remaining
+            .pop()
+            .or_else(|| self.explicit_axioms.pop());
+        if let Some(ax) = ax {
+            inst.deactivate_axiom(ax);
             ControlFlow::Continue(())
         } else {
             ControlFlow::Break(())

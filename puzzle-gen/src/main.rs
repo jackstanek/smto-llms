@@ -115,6 +115,7 @@ fn main() -> anyhow::Result<()> {
     );
 
     // 4. Set up the SMT backend.
+    debug!("using cvc5 binary at `{}`", args.cvc5);
     let storage = Storage::new();
     let cvc5 = Cvc5Binary::new(&args.cvc5)
         .with_context(|| format!("failed to spawn cvc5 at `{}`", args.cvc5))?;

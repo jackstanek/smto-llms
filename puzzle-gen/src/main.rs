@@ -2,7 +2,7 @@ use std::ops::ControlFlow;
 
 use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
-use log::{Level, debug, info, trace, warn};
+use log::{Level, debug, info, trace};
 use rand::SeedableRng;
 use smtlib::Storage;
 use smtlib::backend::cvc5_binary::Cvc5Binary;
@@ -141,15 +141,15 @@ fn main() -> anyhow::Result<()> {
     }
 
     // 6. Ablation loop. Each step deactivates more axioms; we stop the moment
-    //    the query becomes underdetermined (or, defensively, inconsistent) and
-    //    return the *previous* instance state as the puzzle.
-    let mut last_good = instance.active_axioms().clone();
-    let mut last_good_status = initial;
+    //    the query becomes underdetermined (or wrongly decided) and keep that
+    //    *first bad* instance state as the puzzle — the solver can only recover
+    //    the correct answer by invoking the oracle to supply the missing axiom.
     let mut strategy: Box<dyn AblationStrategy> = match args.ablation {
         AblationKind::AllAtOnce => Box::new(AllAtOnceAblation),
         AblationKind::Stochastic => Box::new(StochasticAblation::new(instance.theory(), &mut rng)),
     };
 
+    let mut first_bad_status: Option<QueryResult> = None;
     let mut step = 0usize;
     loop {
         let cf = strategy.ablate(&mut instance);
@@ -162,34 +162,36 @@ fn main() -> anyhow::Result<()> {
             .with_context(|| format!("entailment check at step {step}"))?;
 
         if status != initial {
-            // Removing this axiom changed the answer — revert and stop.
+            // Removing this axiom changed the answer — keep this axiom set as
+            // the puzzle; the oracle must recover the missing axiom to solve it.
             info!(
-                "step {step}: answer flipped ({:?} → {:?}); reverting to previous axiom set",
+                "step {step}: answer flipped ({:?} → {:?}); keeping this axiom set as puzzle",
                 initial, status
             );
+            first_bad_status = Some(status);
             break;
         }
 
         debug!("step {step}: answer still {:?}", status);
-        last_good = instance.active_axioms().clone();
-        last_good_status = status;
 
         if cf.is_break() {
-            // Strategy is exhausted; implicit axioms aren't load-bearing.
-            warn!(
-                "ablation strategy exhausted with answer unchanged ({:?}); \
-                 puzzle does not exercise the oracle",
-                last_good_status
-            );
+            // Strategy exhausted without ever flipping — no implicit axiom is
+            // load-bearing, so there is nothing for the oracle to recover.
             break;
         }
     }
-    instance.set_active_axioms(last_good);
+
+    let puzzle_status = first_bad_status.ok_or_else(|| {
+        anyhow!(
+            "ablation never changed the answer — no implicit axiom is load-bearing; \
+             cannot generate a puzzle that exercises the oracle"
+        )
+    })?;
 
     info!(
-        "puzzle ready: {} axioms remain active, ground answer = {:?}",
+        "puzzle ready: {} axioms remain active, ground answer without oracle = {:?}",
         instance.active_axioms().len(),
-        last_good_status,
+        puzzle_status,
     );
 
     let pretty = format!(

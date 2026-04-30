@@ -1,10 +1,14 @@
-//! Pretty-printing for [`Instance`], [`Axiom`], and related IR types.
+//! Pretty-printing for [`Instance`], [`Axiom`], [`Formula`], and related IR
+//! types.
 //!
 //! # Entry points
 //!
 //! - [`PrettyAxiom`] — wraps a single axiom plus its theory; implements
 //!   [`Display`].  Prints the axiom name, explicit/implicit tag, and a
 //!   quantified formula using the theory's declared names.
+//! - [`PrettyFormula`] — wraps a [`Formula`] plus an [`Instance`] (for
+//!   constant name resolution); implements [`Display`].  Handles all formula
+//!   variants recursively.
 //! - [`PrettyInstance`] — wraps an instance; implements [`Display`].  Prints
 //!   the domain and **only** the currently active axioms.
 //!
@@ -28,7 +32,7 @@ use std::{
     fmt::{self, Write as _},
 };
 
-use crate::theories::{Atom, AxiomBody, ConstId, Instance, SortId, Term, Theory, VarId};
+use crate::theories::{Atom, AxiomBody, ConstId, Formula, Instance, SortId, Term, Theory, VarId};
 
 // -- Variable naming ---------------------------------------------------------
 
@@ -222,6 +226,131 @@ impl fmt::Display for PrettyAxiom<'_> {
         Ok(())
     }
 }
+
+// -- Formula pretty-printer --------------------------------------------------
+
+/// Operator precedence levels, lowest to highest, for parenthesisation.
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Prec {
+    Implies, // lowest
+    Or,
+    And,
+    Not,
+    Atom, // highest – never needs parens
+}
+
+fn formula_prec(f: &Formula) -> Prec {
+    match f {
+        Formula::Implies(..) => Prec::Implies,
+        Formula::Or(..) => Prec::Or,
+        Formula::And(..) => Prec::And,
+        Formula::Not(..) => Prec::Not,
+        Formula::Atom(..) | Formula::Forall(..) | Formula::Exists(..) => Prec::Atom,
+    }
+}
+
+/// Recursive formula writer.
+///
+/// `var_map` is cloned and extended when entering quantifiers so that the
+/// caller's map is unchanged after each recursive call.
+fn write_formula(
+    out: &mut fmt::Formatter<'_>,
+    formula: &Formula,
+    theory: &Theory,
+    var_map: &mut HashMap<VarId, String>,
+    const_names: &HashMap<ConstId, &str>,
+    next_var: &mut usize,
+    // Minimum precedence of the context; sub-expressions with lower prec get parens.
+    ctx_prec: Prec,
+) -> fmt::Result {
+    let needs_parens = formula_prec(formula) < ctx_prec;
+    if needs_parens {
+        out.write_char('(')?;
+    }
+
+    match formula {
+        Formula::Atom(atom) => {
+            write!(out, "{}", FmtAtom { atom, theory, var_map, const_names })?;
+        }
+        Formula::Not(inner) => {
+            out.write_str("¬")?;
+            write_formula(out, inner, theory, var_map, const_names, next_var, Prec::Not)?;
+        }
+        Formula::And(children) => {
+            for (i, child) in children.iter().enumerate() {
+                if i > 0 {
+                    out.write_str(" ∧ ")?;
+                }
+                write_formula(out, child, theory, var_map, const_names, next_var, Prec::And)?;
+            }
+        }
+        Formula::Or(children) => {
+            for (i, child) in children.iter().enumerate() {
+                if i > 0 {
+                    out.write_str(" ∨ ")?;
+                }
+                write_formula(out, child, theory, var_map, const_names, next_var, Prec::Or)?;
+            }
+        }
+        Formula::Implies(ante, cons) => {
+            write_formula(out, ante, theory, var_map, const_names, next_var, Prec::Or)?;
+            out.write_str(" → ")?;
+            write_formula(out, cons, theory, var_map, const_names, next_var, Prec::Implies)?;
+        }
+        Formula::Forall(vars, body) | Formula::Exists(vars, body) => {
+            let q = if matches!(formula, Formula::Forall(..)) { "∀" } else { "∃" };
+            out.write_str(q)?;
+            let mut extended = var_map.clone();
+            for &(var, sort) in vars {
+                let name = var_name(*next_var);
+                *next_var += 1;
+                extended.insert(var, name.clone());
+                write!(out, " {}: {}", name, theory.sort(sort).name())?;
+            }
+            out.write_str(". ")?;
+            write_formula(out, body, theory, &mut extended, const_names, next_var, Prec::Implies)?;
+        }
+    }
+
+    if needs_parens {
+        out.write_char(')')?;
+    }
+    Ok(())
+}
+
+/// Display wrapper for a [`Formula`].
+///
+/// Requires an [`Instance`] to resolve domain constant names.  Variable names
+/// in quantifiers are assigned fresh names from the `p, q, r, ...` sequence.
+pub struct PrettyFormula<'a, 't> {
+    pub formula: &'a Formula,
+    pub instance: &'a Instance<'t>,
+}
+
+impl fmt::Display for PrettyFormula<'_, '_> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let theory = self.instance.theory();
+        let const_names: HashMap<ConstId, &str> = self
+            .instance
+            .constants()
+            .iter()
+            .map(|(id, decl)| (id, decl.name()))
+            .collect();
+        let mut var_map = HashMap::new();
+        let mut next_var = 0usize;
+        write_formula(
+            f,
+            self.formula,
+            theory,
+            &mut var_map,
+            &const_names,
+            &mut next_var,
+            Prec::Implies,
+        )
+    }
+}
+
+// ---------------------------------------------------------------------------
 
 /// Display wrapper for an [`Instance`].
 ///

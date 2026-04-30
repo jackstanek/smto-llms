@@ -15,7 +15,7 @@ mod solvers;
 mod theories;
 
 use crate::concrete_theories::workplace::{WorkplaceGenerator, WorkplaceQueryGenerator};
-use crate::pprint::PrettyInstance;
+use crate::pprint::{PrettyFormula, PrettyInstance};
 use crate::solvers::{Backend, QueryResult, SmtBackend};
 use crate::theories::{
     AblationStrategy, AllAtOnceAblation, Instance, ModelGenerator, QueryGenerator,
@@ -102,11 +102,17 @@ fn main() -> anyhow::Result<()> {
     let mut query_gen =
         WorkplaceQueryGenerator::new(rand::rngs::StdRng::seed_from_u64(args.seed.wrapping_add(2)));
     let query = query_gen.generate(&model);
-    debug!("query: {:?}", &query);
 
     // 3. Materialise the model as an Instance with all axioms active.
     let mut instance = Instance::from_ground_model(model);
     trace!("initialized instance");
+    info!(
+        "query: {}",
+        PrettyFormula {
+            formula: &query,
+            instance: &instance
+        }
+    );
 
     // 4. Set up the SMT backend.
     let storage = Storage::new();
@@ -185,7 +191,15 @@ fn main() -> anyhow::Result<()> {
         last_good_status,
     );
 
-    println!("{}", PrettyInstance { instance: &instance });
+    let pretty = format!(
+        "{}",
+        PrettyInstance {
+            instance: &instance
+        }
+    );
+    for line in pretty.lines() {
+        info!("{line}");
+    }
 
     info!("exiting");
     Ok(())

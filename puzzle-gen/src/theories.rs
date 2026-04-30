@@ -364,6 +364,58 @@ impl Theory {
     }
 }
 
+// -- Least Fixed Point helpers -----------------------------------------------
+
+pub(crate) fn eval_term(term: &Term, binding: &HashMap<VarId, ConstId>) -> Option<ConstId> {
+    match term {
+        Term::DomainConst(c) => Some(*c),
+        Term::Var(v) => binding.get(v).copied(),
+        Term::Const(_) | Term::App { .. } => None,
+    }
+}
+
+pub(crate) fn body_holds(
+    body: &[Atom],
+    binding: &HashMap<VarId, ConstId>,
+    lfp: &HashSet<(SymbolId, Vec<ConstId>)>,
+) -> bool {
+    body.iter().all(|atom| match atom {
+        Atom::Predicate { symbol, args } => args
+            .iter()
+            .map(|t| eval_term(t, binding))
+            .collect::<Option<Vec<_>>>()
+            .is_some_and(|gs| lfp.contains(&(*symbol, gs))),
+        Atom::Eq(t1, t2) => matches!(
+            (eval_term(t1, binding), eval_term(t2, binding)),
+            (Some(a), Some(b)) if a == b
+        ),
+        Atom::Neq(t1, t2) => matches!(
+            (eval_term(t1, binding), eval_term(t2, binding)),
+            (Some(a), Some(b)) if a != b
+        ),
+    })
+}
+
+pub(crate) fn enumerate_bindings(
+    vars: &[(VarId, SortId)],
+    domain: &HashMap<SortId, Vec<ConstId>>,
+) -> Vec<HashMap<VarId, ConstId>> {
+    vars.iter().fold(vec![HashMap::new()], |acc, &(var, sort)| {
+        let consts = domain.get(&sort).map_or(&[] as &[ConstId], Vec::as_slice);
+        acc.into_iter()
+            .flat_map(|b| {
+                consts.iter().map(move |&c| {
+                    let mut b = b.clone();
+                    b.insert(var, c);
+                    b
+                })
+            })
+            .collect()
+    })
+}
+
+// ---------------------------------------------------------------------------
+
 /// A ground-truth model of a theory: the theory schema plus a concrete domain
 /// of constants and the extensions of each predicate / function.
 ///
@@ -434,6 +486,47 @@ impl<'t> GroundModel<'t> {
             .entry(function)
             .or_default()
             .insert(args, value);
+    }
+
+    /// Compute the LFP of all theory Horn axioms over this model's domain.
+    ///
+    /// Seeds from the explicit predicate facts and forward-chains until no new
+    /// atoms are derived. Returns the full set of entailed ground predicate atoms.
+    pub fn entailed_predicates(&self) -> HashSet<(SymbolId, Vec<ConstId>)> {
+        let mut lfp: HashSet<(SymbolId, Vec<ConstId>)> = self
+            .predicates
+            .iter()
+            .flat_map(|(&sym, tuples)| tuples.iter().map(move |t| (sym, t.clone())))
+            .collect();
+
+        loop {
+            let mut added = false;
+            for (_, axiom) in self.theory.axioms() {
+                if let AxiomBody::Horn { body, head } = axiom.body()
+                    && let Atom::Predicate {
+                        symbol: head_sym,
+                        args: head_args,
+                    } = head
+                {
+                    for binding in enumerate_bindings(axiom.vars(), &self.domain) {
+                        if body_holds(body, &binding, &lfp) {
+                            let ground: Option<Vec<ConstId>> =
+                                head_args.iter().map(|t| eval_term(t, &binding)).collect();
+                            if let Some(args) = ground
+                                && lfp.insert((*head_sym, args))
+                            {
+                                added = true;
+                            }
+                        }
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        lfp
     }
 }
 

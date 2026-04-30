@@ -28,7 +28,10 @@
 //! let instance = theory.instantiate(domain);
 //! ```
 
-use std::{collections::VecDeque, sync::OnceLock};
+use std::{
+    collections::VecDeque,
+    sync::OnceLock,
+};
 
 use rand::{Rng, seq::IndexedRandom};
 use rand_distr::{Distribution, Poisson};
@@ -71,33 +74,30 @@ where
 {
     fn generate(&mut self, model: &GroundModel<'static>) -> Formula {
         let t = model.theory();
-        let employee_sort = find_sort(t, "employee");
-        let employees = model
-            .domain()
-            .get(&employee_sort)
-            .expect("workplace model has no employees");
+        let can_fire_sym = find_symbol(t, "can_fire");
+        let can_approve_sym = find_symbol(t, "can_approve_expense");
+
+        // Restrict to derived authority atoms so ablation exercises the oracle.
+        let lfp = model.entailed_predicates();
+        let derived: Vec<(SymbolId, ConstId, ConstId)> = lfp
+            .iter()
+            .filter_map(|(sym, args)| {
+                if (*sym == can_fire_sym || *sym == can_approve_sym) && args.len() == 2 && args[0] != args[1] {
+                    Some((*sym, args[0], args[1]))
+                } else {
+                    None
+                }
+            })
+            .collect();
+
         assert!(
-            employees.len() >= 2,
-            "workplace query needs at least 2 employees"
+            !derived.is_empty(),
+            "no derived authority atoms — cannot generate a meaningful query"
         );
 
-        let predicates = [
-            find_symbol(t, "can_fire"),
-            find_symbol(t, "can_approve_expense"),
-        ];
-        let predicate = *predicates.choose(&mut self.rng).unwrap();
-
-        // Pick two distinct employees.
-        let p = *employees.choose(&mut self.rng).unwrap();
-        let q = loop {
-            let candidate = *employees.choose(&mut self.rng).unwrap();
-            if candidate != p {
-                break candidate;
-            }
-        };
-
+        let &(sym, p, q) = derived.choose(&mut self.rng).unwrap();
         Formula::Atom(Atom::Predicate {
-            symbol: predicate,
+            symbol: sym,
             args: vec![Term::DomainConst(p), Term::DomainConst(q)],
         })
     }

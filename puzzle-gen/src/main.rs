@@ -148,25 +148,27 @@ fn main() -> anyhow::Result<()> {
         backend
             .load_instance(&instance)
             .with_context(|| format!("reloading instance after ablation step {step}"))?;
-        match backend
+        let status = backend
             .check_entailment(&query)
-            .with_context(|| format!("entailment check at step {step}"))?
-        {
-            status @ (QueryResult::Entailed | QueryResult::Refuted) => {
-                debug!("step {step}: still uniquely decided ({:?})", status);
-                last_good = instance.active_axioms().clone();
-                last_good_status = status;
-            }
-            QueryResult::Undetermined => {
-                info!("step {step}: query became underdetermined; reverting to previous axiom set");
-                break;
-            }
+            .with_context(|| format!("entailment check at step {step}"))?;
+
+        if status != initial {
+            // Removing this axiom changed the answer — revert and stop.
+            info!(
+                "step {step}: answer flipped ({:?} → {:?}); reverting to previous axiom set",
+                initial, status
+            );
+            break;
         }
+
+        debug!("step {step}: answer still {:?}", status);
+        last_good = instance.active_axioms().clone();
+        last_good_status = status;
+
         if cf.is_break() {
-            // Strategy is exhausted but the query is still uniquely decided —
-            // the implicit axioms aren't load-bearing for this query.
+            // Strategy is exhausted; implicit axioms aren't load-bearing.
             warn!(
-                "ablation strategy exhausted with query still uniquely decided ({:?}); \
+                "ablation strategy exhausted with answer unchanged ({:?}); \
                  puzzle does not exercise the oracle",
                 last_good_status
             );

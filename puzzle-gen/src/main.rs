@@ -10,10 +10,12 @@ use smtlib::backend::cvc5_binary::Cvc5Binary;
 #[macro_use]
 mod macros;
 mod concrete_theories;
+mod pprint;
 mod solvers;
 mod theories;
 
 use crate::concrete_theories::workplace::{WorkplaceGenerator, WorkplaceQueryGenerator};
+use crate::pprint::PrettyInstance;
 use crate::solvers::{Backend, QueryResult, SmtBackend};
 use crate::theories::{
     AblationStrategy, AllAtOnceAblation, Instance, ModelGenerator, QueryGenerator,
@@ -182,6 +184,8 @@ fn main() -> anyhow::Result<()> {
         instance.active_axioms().len(),
         last_good_status,
     );
+
+    println!("{}", PrettyInstance { instance: &instance });
 
     info!("exiting");
     Ok(())

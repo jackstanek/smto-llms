@@ -269,6 +269,10 @@ impl Theory {
         self.sorts.iter()
     }
 
+    pub fn sort(&self, id: SortId) -> &SortDecl {
+        &self.sorts[id]
+    }
+
     pub fn symbols(&self) -> slotmap::basic::Iter<'_, SymbolId, SymbolDecl> {
         self.symbols.iter()
     }

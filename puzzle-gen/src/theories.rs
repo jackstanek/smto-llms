@@ -4,11 +4,12 @@
 
 use std::{
     collections::{HashMap, HashSet},
+    fmt::Display,
     ops::ControlFlow,
 };
 
 use itertools::{Either, Itertools};
-use log::info;
+use log::debug;
 use rand::{Rng, seq::SliceRandom};
 use slotmap::{SlotMap, new_key_type};
 
@@ -196,16 +197,13 @@ impl Axiom {
         self.meta.name()
     }
 
+    pub fn kind(&self) -> &AxiomKind {
+        &self.meta.kind
+    }
+
+    /// Convenience function to check if this axiom is implicit.
     pub fn implicit_by_default(&self) -> bool {
         self.meta.implicit_by_default()
-    }
-
-    pub fn natural_language(&self) -> &str {
-        self.meta.natural_language()
-    }
-
-    pub fn depends_on(&self) -> &[AxiomId] {
-        self.meta.depends_on()
     }
 
     pub fn vars(&self) -> &[(VarId, SortId)] {
@@ -217,10 +215,38 @@ impl Axiom {
     }
 }
 
+/// Axiom kind, determines whether it is an "implicit" (i.e. recoverable from a
+/// world model) or "explicit" axiom.
+#[derive(Clone, Debug)]
+pub enum AxiomKind {
+    Implicit,
+    Explicit,
+}
+
+impl AxiomKind {
+    /// Check if this axiom is implicit.
+    pub fn is_implicit(&self) -> bool {
+        matches!(self, AxiomKind::Implicit)
+    }
+}
+
+impl Display for AxiomKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{}",
+            match self {
+                AxiomKind::Implicit => "implicit",
+                AxiomKind::Explicit => "explicit",
+            }
+        )
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct AxiomMeta {
     name: String,
-    implicit_by_default: bool,
+    kind: AxiomKind,
     natural_language: String,
     depends_on: Vec<AxiomId>,
 }
@@ -228,13 +254,13 @@ pub struct AxiomMeta {
 impl AxiomMeta {
     pub fn new(
         name: impl Into<String>,
-        implicit_by_default: bool,
+        kind: AxiomKind,
         natural_language: impl Into<String>,
         depends_on: Vec<AxiomId>,
     ) -> Self {
         Self {
             name: name.into(),
-            implicit_by_default,
+            kind,
             natural_language: natural_language.into(),
             depends_on,
         }
@@ -245,22 +271,13 @@ impl AxiomMeta {
     }
 
     pub fn implicit_by_default(&self) -> bool {
-        self.implicit_by_default
-    }
-
-    pub fn natural_language(&self) -> &str {
-        &self.natural_language
-    }
-
-    pub fn depends_on(&self) -> &[AxiomId] {
-        &self.depends_on
+        self.kind.is_implicit()
     }
 }
 
 /// A theory schema: sorts and symbols declared, axioms defined parametrically.
 /// Becomes an Instance when sorts are grounded and facts are added.
 pub struct Theory {
-    name: Option<String>,
     sorts: SlotMap<SortId, SortDecl>,
     symbols: SlotMap<SymbolId, SymbolDecl>,
     axioms: SlotMap<AxiomId, Axiom>,
@@ -293,21 +310,8 @@ impl Theory {
 
     /// Construct a new empty theory.
     pub fn new() -> Self {
-        info!("creating new empty theory");
+        debug!("creating new empty theory");
         Self {
-            name: None,
-            sorts: SlotMap::with_key(),
-            symbols: SlotMap::with_key(),
-            axioms: SlotMap::with_key(),
-        }
-    }
-
-    /// Construct a new empty theory with the given name.
-    pub fn new_named(name: impl Into<String>) -> Self {
-        let name = name.into();
-        info!("creating new theory: {}", name);
-        Self {
-            name: Some(name),
             sorts: SlotMap::with_key(),
             symbols: SlotMap::with_key(),
             axioms: SlotMap::with_key(),
@@ -618,19 +622,11 @@ impl<'t> Instance<'t> {
         &self.active_axioms
     }
 
-    /// Add a ground fact to the instance.
-    pub fn add_fact(&mut self, fact: Atom) {
-        self.facts.push(fact);
-    }
-
     /// Deactivate an axiom (for ablation).
     pub fn deactivate_axiom(&mut self, id: AxiomId) {
         self.active_axioms.remove(&id);
-    }
-
-    /// Replace the active axiom set.
-    pub fn set_active_axioms(&mut self, axioms: HashSet<AxiomId>) {
-        self.active_axioms = axioms;
+        let ax = self.theory.axiom(id);
+        debug!("deactivated axiom {} [{}]", ax.name(), ax.kind());
     }
 }
 

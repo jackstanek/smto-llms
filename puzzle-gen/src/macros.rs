@@ -139,7 +139,12 @@ macro_rules! theory_stmt {
                 symbol: $hpred,
                 args: vec![$( $crate::theories::Term::Var($harg) ),*],
             };
-            let __meta = $crate::theories::AxiomMeta::new($name, $implicit, $nl, vec![]);
+            let __implicit = if $implicit {
+                $crate::theories::AxiomKind::Implicit
+            } else {
+                $crate::theories::AxiomKind::Explicit
+            };
+            let __meta = $crate::theories::AxiomMeta::new($name, __implicit, $nl, vec![]);
             $t.add_axiom(
                 __meta,
                 __vars,
@@ -180,7 +185,12 @@ macro_rules! theory_stmt {
                     }
                 ),+
             ];
-            let __meta = $crate::theories::AxiomMeta::new($name, $implicit, $nl, vec![]);
+            let __implicit = if $implicit {
+                $crate::theories::AxiomKind::Implicit
+            } else {
+                $crate::theories::AxiomKind::Explicit
+            };
+            let __meta = $crate::theories::AxiomMeta::new($name, __implicit, $nl, vec![]);
             $t.add_axiom(
                 __meta,
                 __vars,

@@ -156,7 +156,12 @@ impl fmt::Display for PrettyAxiom<'_> {
 
         macro_rules! atom {
             ($a:expr) => {
-                FmtAtom { atom: $a, theory, var_map: &var_map, const_names: &no_consts }
+                FmtAtom {
+                    atom: $a,
+                    theory,
+                    var_map: &var_map,
+                    const_names: &no_consts,
+                }
             };
         }
 
@@ -203,19 +208,34 @@ impl fmt::Display for PrettyAxiom<'_> {
                 }
                 f.write_char(')')?;
             }
-            AxiomBody::FunctionalFact { symbol, args, value } => {
+            AxiomBody::FunctionalFact {
+                symbol,
+                args,
+                value,
+            } => {
                 let no_vars: HashMap<VarId, String> = HashMap::new();
                 write!(f, "{}(", theory.symbol(*symbol).name())?;
                 for (i, arg) in args.iter().enumerate() {
                     if i > 0 {
                         f.write_str(", ")?;
                     }
-                    FmtTerm { term: arg, theory, var_map: &no_vars, const_names: &no_consts }.fmt(f)?;
+                    FmtTerm {
+                        term: arg,
+                        theory,
+                        var_map: &no_vars,
+                        const_names: &no_consts,
+                    }
+                    .fmt(f)?;
                 }
                 write!(
                     f,
                     ") = {}",
-                    FmtTerm { term: value, theory, var_map: &no_vars, const_names: &no_consts }
+                    FmtTerm {
+                        term: value,
+                        theory,
+                        var_map: &no_vars,
+                        const_names: &no_consts
+                    }
                 )?;
             }
             AxiomBody::General(_) => {
@@ -270,18 +290,43 @@ fn write_formula(
 
     match formula {
         Formula::Atom(atom) => {
-            write!(out, "{}", FmtAtom { atom, theory, var_map, const_names })?;
+            write!(
+                out,
+                "{}",
+                FmtAtom {
+                    atom,
+                    theory,
+                    var_map,
+                    const_names
+                }
+            )?;
         }
         Formula::Not(inner) => {
             out.write_str("¬")?;
-            write_formula(out, inner, theory, var_map, const_names, next_var, Prec::Not)?;
+            write_formula(
+                out,
+                inner,
+                theory,
+                var_map,
+                const_names,
+                next_var,
+                Prec::Not,
+            )?;
         }
         Formula::And(children) => {
             for (i, child) in children.iter().enumerate() {
                 if i > 0 {
                     out.write_str(" ∧ ")?;
                 }
-                write_formula(out, child, theory, var_map, const_names, next_var, Prec::And)?;
+                write_formula(
+                    out,
+                    child,
+                    theory,
+                    var_map,
+                    const_names,
+                    next_var,
+                    Prec::And,
+                )?;
             }
         }
         Formula::Or(children) => {
@@ -295,10 +340,22 @@ fn write_formula(
         Formula::Implies(ante, cons) => {
             write_formula(out, ante, theory, var_map, const_names, next_var, Prec::Or)?;
             out.write_str(" → ")?;
-            write_formula(out, cons, theory, var_map, const_names, next_var, Prec::Implies)?;
+            write_formula(
+                out,
+                cons,
+                theory,
+                var_map,
+                const_names,
+                next_var,
+                Prec::Implies,
+            )?;
         }
         Formula::Forall(vars, body) | Formula::Exists(vars, body) => {
-            let q = if matches!(formula, Formula::Forall(..)) { "∀" } else { "∃" };
+            let q = if matches!(formula, Formula::Forall(..)) {
+                "∀"
+            } else {
+                "∃"
+            };
             out.write_str(q)?;
             let mut extended = var_map.clone();
             for &(var, sort) in vars {
@@ -308,7 +365,15 @@ fn write_formula(
                 write!(out, " {}: {}", name, theory.sort(sort).name())?;
             }
             out.write_str(". ")?;
-            write_formula(out, body, theory, &mut extended, const_names, next_var, Prec::Implies)?;
+            write_formula(
+                out,
+                body,
+                theory,
+                &mut extended,
+                const_names,
+                next_var,
+                Prec::Implies,
+            )?;
         }
     }
 
@@ -374,7 +439,10 @@ impl<'a, 't> fmt::Display for PrettyInstance<'a, 't> {
         let mut sorts: Vec<_> = theory.sorts().collect();
         sorts.sort_by_key(|(_, s)| s.name());
         for (sort_id, sort_decl) in &sorts {
-            let consts = inst.domain().get(sort_id).map_or(&[] as &[ConstId], Vec::as_slice);
+            let consts = inst
+                .domain()
+                .get(sort_id)
+                .map_or(&[] as &[ConstId], Vec::as_slice);
             let names: Vec<&str> = consts.iter().map(|c| inst.constant(*c).name()).collect();
             writeln!(
                 f,

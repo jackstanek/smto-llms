@@ -393,7 +393,8 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         // Pop the previous instance's assertion scope (if any) to clear all
         // per-instance assertions. Declarations are permanent and survive this.
         if self.instance_scope_active {
-            self.solver.run_command(ast::Command::Pop(lexicon::Numeral::from_usize(1)))?;
+            self.solver
+                .run_command(ast::Command::Pop(lexicon::Numeral::from_usize(1)))?;
             self.instance_scope_active = false;
         }
 
@@ -427,11 +428,13 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
                     let fun = smtlib::funs::Fun::new(self.st, const_name, vec![], sort);
                     self.solver.declare_fun(&fun)?;
                     let name = self.st.alloc_str(const_name);
-                    let qi = ast::QualIdentifier::Identifier(
-                        ast::Identifier::Simple(lexicon::Symbol(name)),
+                    let qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(
+                        lexicon::Symbol(name),
+                    ));
+                    let dynamic = Dynamic::from_term_sort(
+                        STerm::new(self.st, ast::Term::Identifier(qi)),
+                        sort,
                     );
-                    let dynamic =
-                        Dynamic::from_term_sort(STerm::new(self.st, ast::Term::Identifier(qi)), sort);
                     self.smt_domain_consts.insert(const_id, dynamic);
                 }
             }
@@ -461,7 +464,8 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
 
         // Push a fresh scope for this instance's assertions. Everything
         // asserted below will be cleared when this scope is popped.
-        self.solver.run_command(ast::Command::Push(lexicon::Numeral::from_usize(1)))?;
+        self.solver
+            .run_command(ast::Command::Push(lexicon::Numeral::from_usize(1)))?;
         self.instance_scope_active = true;
 
         let empty_var_map = HashMap::new();

@@ -106,6 +106,17 @@ where
 /// Construct the workplace `Theory`.  Called at most once by [`theory`].
 fn build() -> Theory {
     theory! {
+        // Natural language preamble
+        preamble! (
+            "The context for this logic puzzle is workplace relations.
+            The domain is a company. You must construct a corporate name for the company.
+            The company has a certain number of departments.
+            Assign a name to each department, such as finance, human resources, engineering, and so on.
+            There are also several employees, including the CEO, department heads, and other employees.
+            Assign a name to each employee, making sure to have an even balance of male and female names.
+            "
+        );
+
         // ------------------------------------------------------------------
         // Sorts
         // ------------------------------------------------------------------

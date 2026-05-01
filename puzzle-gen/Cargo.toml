@@ -13,3 +13,5 @@ rand_distr = "0.6.0"
 slotmap = "1.1.1"
 smtlib = "0.3.0"
 itertools = "0.14.0"
+rig-core = "0.35.0"
+tokio = { version = "1.52.1", features = ["full"] }

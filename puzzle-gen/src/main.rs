@@ -4,17 +4,21 @@ use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
 use log::{Level, debug, info, trace};
 use rand::SeedableRng;
+use rig::client::ProviderClient;
+use rig::providers::gemini;
 use smtlib::Storage;
 use smtlib::backend::cvc5_binary::Cvc5Binary;
 
 #[macro_use]
 mod macros;
 mod concrete_theories;
+mod llm;
 mod pprint;
 mod solvers;
 mod theories;
 
 use crate::concrete_theories::workplace::{WorkplaceGenerator, WorkplaceQueryGenerator};
+use crate::llm::RendererAgent;
 use crate::pprint::{PrettyFormula, PrettyInstance};
 use crate::solvers::{Backend, QueryResult, SmtBackend};
 use crate::theories::{
@@ -75,7 +79,8 @@ fn logger_setup(level: Option<Level>) -> anyhow::Result<()> {
     builder.try_init().context("couldn't initialize logger")
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main]
+async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
     logger_setup(args.log_level)?;
     info!("puzzle-gen started");
@@ -201,6 +206,17 @@ fn main() -> anyhow::Result<()> {
         }
     );
     for line in pretty.lines() {
+        info!("{line}");
+    }
+
+    let client = std::env::var("GEMINI_API_KEY")
+        .context("environment variable GEMINI_API_KEY not set")
+        .and_then(|api_key| {
+            gemini::Client::new(api_key).context("couldn't construct Gemini API client")
+        })?;
+    let renderer = RendererAgent::new(client, gemini::completion::GEMINI_3_FLASH_PREVIEW);
+    let nl_story = renderer.render(&instance).await?;
+    for line in nl_story.lines() {
         info!("{line}");
     }
 

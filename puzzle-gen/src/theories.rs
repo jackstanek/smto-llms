@@ -281,6 +281,9 @@ pub struct Theory {
     sorts: SlotMap<SortId, SortDecl>,
     symbols: SlotMap<SymbolId, SymbolDecl>,
     axioms: SlotMap<AxiomId, Axiom>,
+    /// Natural language preamble to include in the system prompt for the
+    /// natural langauge rendering.
+    nl_preamble: Option<String>,
 }
 
 impl Theory {
@@ -315,7 +318,15 @@ impl Theory {
             sorts: SlotMap::with_key(),
             symbols: SlotMap::with_key(),
             axioms: SlotMap::with_key(),
+            nl_preamble: None,
         }
+    }
+
+    /// Set the natural-language preamble for this theory. This is used when
+    /// generating the natural language problems to give instructions to the LLM
+    /// on how to generate e.g. names, context, etc.
+    pub fn set_preamble(&mut self, preamble: impl Into<String>) {
+        self.nl_preamble = Some(preamble.into())
     }
 
     /// Add a sort to the theory.
@@ -627,6 +638,11 @@ impl<'t> Instance<'t> {
         self.active_axioms.remove(&id);
         let ax = self.theory.axiom(id);
         debug!("deactivated axiom {} [{}]", ax.name(), ax.kind());
+    }
+
+    /// Get the natural language preamble of this instance.
+    pub fn preamble(&self) -> Option<&str> {
+        self.theory.nl_preamble.as_deref()
     }
 }
 

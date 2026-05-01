@@ -22,7 +22,7 @@ use crate::llm::RendererAgent;
 use crate::pprint::{PrettyFormula, PrettyInstance};
 use crate::solvers::{Backend, QueryResult, SmtBackend};
 use crate::theories::{
-    AblationStrategy, AllAtOnceAblation, Instance, ModelGenerator, QueryGenerator,
+    AblationStrategy, AllAtOnceAblation, Formula, Instance, ModelGenerator, QueryGenerator,
     StochasticAblation,
 };
 
@@ -66,16 +66,16 @@ impl TryFrom<LLMProvider> for AnyRendererAgent {
                 }),
             LLMProvider::Ollama => ollama::Client::new(Nothing)
                 .context("couldn't construct Ollama API client")
-                .map(|client| Self::Ollama(RendererAgent::new(client, "gemma4:latest"))),
+                .map(|client| Self::Ollama(RendererAgent::new(client, "olmo-3:7b-instruct"))),
         }
     }
 }
 
 impl AnyRendererAgent {
-    async fn render<'t>(&self, instance: &Instance<'t>) -> anyhow::Result<String> {
+    async fn render<'t>(&self, query: &Formula, instance: &Instance<'t>) -> anyhow::Result<String> {
         match self {
-            AnyRendererAgent::Gemini(agent) => agent.render(instance).await,
-            AnyRendererAgent::Ollama(agent) => agent.render(instance).await,
+            AnyRendererAgent::Gemini(agent) => agent.render(query, instance).await,
+            AnyRendererAgent::Ollama(agent) => agent.render(query, instance).await,
         }
     }
 }
@@ -260,12 +260,11 @@ async fn main() -> anyhow::Result<()> {
     }
 
     let renderer = AnyRendererAgent::try_from(args.llm_provider)?;
-    let nl_story = renderer.render(&instance).await?;
+    let nl_story = renderer.render(&query, &instance).await?;
     for line in nl_story.lines() {
         info!("{line}");
     }
 
-    info!("exiting");
     Ok(())
 }
 

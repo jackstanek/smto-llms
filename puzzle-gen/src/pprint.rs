@@ -392,6 +392,12 @@ pub struct PrettyFormula<'a, 't> {
     pub instance: &'a Instance<'t>,
 }
 
+impl<'a, 't> PrettyFormula<'a, 't> {
+    pub fn from(formula: &'a Formula, instance: &'a Instance<'t>) -> Self {
+        Self { formula, instance }
+    }
+}
+
 impl fmt::Display for PrettyFormula<'_, '_> {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let theory = self.instance.theory();
@@ -423,6 +429,12 @@ impl fmt::Display for PrettyFormula<'_, '_> {
 /// axioms in alphabetical order.
 pub struct PrettyInstance<'a, 't> {
     pub instance: &'a Instance<'t>,
+}
+
+impl<'a, 't> From<&'a Instance<'t>> for PrettyInstance<'a, 't> {
+    fn from(instance: &'a Instance<'t>) -> Self {
+        Self { instance }
+    }
 }
 
 impl<'a, 't> fmt::Display for PrettyInstance<'a, 't> {

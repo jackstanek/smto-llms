@@ -114,6 +114,38 @@ fn build() -> Theory {
             Assign a name to each department, such as finance, human resources, engineering, and so on.
             There are also several employees, including the CEO, department heads, and other employees.
             Assign a name to each employee, making sure to have an even balance of male and female names.
+
+            <example_problem>
+
+            Instance (2/10 axioms active)
+              Domain:
+                department (3): dept_0, dept_1, dept_2
+                employee (24): ceo, head_0, head_1, head_2, emp_0, emp_1, emp_2, emp_3, emp_4, emp_5, emp_6, emp_7, emp_8, emp_9, emp_10, emp_11, emp_12, emp_13, emp_14, emp_15, emp_16, emp_17, emp_18, emp_19
+              Active axioms:
+                approved_implies_authority [explicit]
+                  ∀ p: employee, q: employee. approved_expense(p, q) → can_approve_expense(p, q)
+                fired_implies_authority [explicit]
+                  ∀ p: employee, q: employee. fired(p, q) → can_fire(p, q)
+
+            query: can_approve_expense(emp_3, emp_12)
+            </example_probem>
+
+            <example_puzzle>
+
+            The Blue Harbor Corporation has three departments: Research,
+            Marketing, and Operations. The employees include the CEO, department
+            heads (Head Research, Head Marketing, Head Operations), and twenty
+            other staff members: Alex, Brianna, Chris, Dana, Ethan, Fiona, Greg,
+            Hannah, Ian, Julia, Kevin, Laura, Mark, Nancy, Olivia, Peter, Queen,
+            Robert, Susan, and Thomas.
+
+            Axioms:
+            1. If an employee is approved to expense something for another employee, then the approving employee can approve the expense.
+            2. If an employee is fired by another, then the firing employee can fire the first.
+
+            Question: Can Dana approve an expense for Mark?
+
+            </example_puzzle>
             "
         );
 

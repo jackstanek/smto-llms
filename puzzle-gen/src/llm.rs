@@ -7,19 +7,24 @@ use rig::{
     completion::{CompletionModel, Prompt},
 };
 
-use crate::pprint::PrettyInstance;
-use crate::theories::Instance;
+use crate::{pprint::PrettyFormula, theories::Instance};
+use crate::{pprint::PrettyInstance, theories::Formula};
 
 const RENDERER_SYSTEM_PROMPT: &'static str = "
+
     You are a logic puzzle expert. You are able to construct a natural language
     logic puzzle from a formal, first-order-logic specification of a theory (set
     of axioms), a set of facts, and a query. The puzzle should have a natural
-    langauge preamble describing the setup of the puzzle, including all listed
-    facts. All axioms should be listed in natural language. The query should be
-    the last sentence of the puzzle description and should be written as a
-    yes-or-no question.
+    langauge preamble describing the background story of the puzzle, as well as
+    all first-order axioms. Each axiom should be described in plain language.
+    Write ONLY the axioms and facts given in the formal puzzle description. Do
+    not add any additional axioms, facts, or details. The \"query\" is the
+    question part of the puzzle that the solver is meant to answer. The query
+    should be the last sentence of the puzzle description and should be written
+    as a yes-or-no question.
 
-    Write only the puzzle; do not ask follow up questions.
+    Write only the puzzle. Do not ask follow-up questions.
+
 ";
 
 #[derive(Clone)]
@@ -36,12 +41,12 @@ where
 {
     /// Construct a new renderer agent which constructs logic puzzles from the
     /// given instances.
-    pub fn new<C>(client: C, agent: impl Into<String>) -> Self
+    pub fn new<C>(client: C, model_name: impl Into<String>) -> Self
     where
         C: CompletionClient<CompletionModel = M>,
     {
         let agent = client
-            .agent(agent)
+            .agent(model_name)
             .preamble(RENDERER_SYSTEM_PROMPT)
             .temperature(0.0)
             .build();
@@ -49,14 +54,24 @@ where
     }
 
     /// Render the instance as a logic puzzle.
-    pub async fn render<'t>(&self, instance: &Instance<'t>) -> anyhow::Result<String> {
+    pub async fn render<'t>(
+        &self,
+        query: &Formula,
+        instance: &Instance<'t>,
+    ) -> anyhow::Result<String> {
         let mut buf = String::new();
         if let Some(preamble) = instance.preamble() {
             buf.extend(preamble.lines());
             buf.push('\n');
         }
-        let pretty = PrettyInstance { instance };
-        buf.push_str(pretty.to_string().as_ref());
+        buf.push_str(PrettyInstance::from(instance).to_string().as_ref());
+        buf.push_str(
+            format!(
+                "query: {}",
+                PrettyFormula::from(query, instance).to_string()
+            )
+            .as_ref(),
+        );
         self.agent.prompt(buf).await.context("error prompting LLM")
     }
 }

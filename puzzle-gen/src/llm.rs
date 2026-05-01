@@ -17,11 +17,12 @@ const RENDERER_SYSTEM_PROMPT: &'static str = "
     langauge preamble describing the setup of the puzzle, including all listed
     facts. All axioms should be listed in natural language. The query should be
     the last sentence of the puzzle description and should be written as a
-    question.
+    yes-or-no question.
 
     Write only the puzzle; do not ask follow up questions.
 ";
 
+#[derive(Clone)]
 pub struct RendererAgent<M>
 where
     M: CompletionModel,

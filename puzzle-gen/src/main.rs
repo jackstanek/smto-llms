@@ -4,8 +4,8 @@ use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
 use log::{Level, debug, info, trace};
 use rand::SeedableRng;
-use rig::client::ProviderClient;
-use rig::providers::gemini;
+use rig::client::Nothing;
+use rig::providers::{gemini, ollama};
 use smtlib::Storage;
 use smtlib::backend::cvc5_binary::Cvc5Binary;
 
@@ -34,9 +34,55 @@ enum AblationKind {
     Stochastic,
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
+enum LLMProvider {
+    /// Google Gemini backend (gemini-flash-3.0-preview by default)
+    Gemini,
+    /// Ollama backend (gemma4 by default)
+    Ollama,
+}
+
+/// Provider-agnostic wrapper for RendererAgent
+#[derive(Clone)]
+enum AnyRendererAgent {
+    Gemini(RendererAgent<gemini::completion::CompletionModel>),
+    Ollama(RendererAgent<ollama::CompletionModel>),
+}
+
+impl TryFrom<LLMProvider> for AnyRendererAgent {
+    type Error = anyhow::Error;
+
+    fn try_from(value: LLMProvider) -> Result<Self, Self::Error> {
+        match value {
+            LLMProvider::Gemini => std::env::var("GEMINI_API_KEY")
+                .context("environment variable GEMINI_API_KEY not set")
+                .and_then(|api_key| {
+                    let client = gemini::Client::new(api_key)
+                        .context("couldn't construct Gemini API client")?;
+                    Ok(Self::Gemini(RendererAgent::new(
+                        client,
+                        gemini::completion::GEMINI_3_FLASH_PREVIEW,
+                    )))
+                }),
+            LLMProvider::Ollama => ollama::Client::new(Nothing)
+                .context("couldn't construct Ollama API client")
+                .map(|client| Self::Ollama(RendererAgent::new(client, "gemma4:latest"))),
+        }
+    }
+}
+
+impl AnyRendererAgent {
+    async fn render<'t>(&self, instance: &Instance<'t>) -> anyhow::Result<String> {
+        match self {
+            AnyRendererAgent::Gemini(agent) => agent.render(instance).await,
+            AnyRendererAgent::Ollama(agent) => agent.render(instance).await,
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(version)]
-pub struct Args {
+struct Args {
     /// Log level (overrides RUST_LOG when set)
     #[arg(long)]
     log_level: Option<Level>,
@@ -64,6 +110,10 @@ pub struct Args {
     /// Path to the cvc5 binary.
     #[arg(long, default_value = "cvc5")]
     cvc5: String,
+
+    /// LLM backend to use for natural language rendering.
+    #[arg(long, short, value_enum, default_value = "ollama")]
+    llm_provider: LLMProvider,
 }
 
 fn logger_setup(level: Option<Level>) -> anyhow::Result<()> {
@@ -209,12 +259,7 @@ async fn main() -> anyhow::Result<()> {
         info!("{line}");
     }
 
-    let client = std::env::var("GEMINI_API_KEY")
-        .context("environment variable GEMINI_API_KEY not set")
-        .and_then(|api_key| {
-            gemini::Client::new(api_key).context("couldn't construct Gemini API client")
-        })?;
-    let renderer = RendererAgent::new(client, gemini::completion::GEMINI_3_FLASH_PREVIEW);
+    let renderer = AnyRendererAgent::try_from(args.llm_provider)?;
     let nl_story = renderer.render(&instance).await?;
     for line in nl_story.lines() {
         info!("{line}");

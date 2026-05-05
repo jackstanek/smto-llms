@@ -164,18 +164,36 @@ fn build() -> Theory {
         //  function is declared for use by Instance-level SMT translation.)
         // ------------------------------------------------------------------
         functions!(
-            works_in(employee) -> department,
+            works_in {
+                (employee) -> department,
+                nl: "{0} works in {ret}"
+            },
         );
 
         // ------------------------------------------------------------------
         // Relations
         // ------------------------------------------------------------------
         predicates!(
-            manages(employee, employee),
-            can_fire(employee, employee),
-            can_approve_expense(employee, employee),
-            fired(employee, employee),
-            approved_expense(employee, employee),
+            manages {
+                (employee, employee),
+                nl: "{0} manages {1}"
+            },
+            can_fire {
+                (employee, employee),
+                nl: "{0} can fire {1}"
+            },
+            can_approve_expense {
+                (employee, employee),
+                nl: "{0} can approve an expense for {1}"
+            },
+            fired {
+                (employee, employee),
+                nl: "{0} fired {1}"
+            },
+            approved_expense {
+                (employee, employee),
+                nl: "{0} approved an expense for {1}"
+            },
         );
 
         // ------------------------------------------------------------------
@@ -185,7 +203,7 @@ fn build() -> Theory {
         horn! {
             name:     "direct_manager_can_fire",
             implicit: true,
-            nl:       "Direct managers can fire their reports",
+            nl:       "Managers can fire their direct reports",
             forall (p: employee, q: employee) {
                 body: manages(p, q);
                 head: can_fire(p, q);
@@ -421,7 +439,7 @@ mod tests {
             .axioms()
             .filter(|(_, a)| a.implicit_by_default())
             .collect();
-        assert_eq!(implicit.len(), 6);
+        assert_eq!(implicit.len(), 8);
 
         // Spot-check names
         let names: std::collections::HashSet<&str> = t.axioms().map(|(_, a)| a.name()).collect();

@@ -62,6 +62,30 @@
 // Each arm matches one `mac ! args` pair with no recursion.
 // ---------------------------------------------------------------------------
 
+// ---------------------------------------------------------------------------
+// predicate_decl! / function_decl! — per-entry dispatch for the
+// with-NL-template vs. without-NL-template forms used by predicates! and
+// functions!. Returning a `SymbolId` so the call site can `let`-bind it.
+// ---------------------------------------------------------------------------
+
+macro_rules! predicate_decl {
+    ($t:ident, $pred:ident, { ( $($param:ident),* $(,)? ), nl: $nl:expr $(,)? }) => {
+        $t.declare_predicate(stringify!($pred), vec![$($param),*], Some($nl))
+    };
+    ($t:ident, $pred:ident, { ( $($param:ident),* $(,)? ) $(,)? }) => {
+        $t.declare_predicate(stringify!($pred), vec![$($param),*], None::<String>)
+    };
+}
+
+macro_rules! function_decl {
+    ($t:ident, $func:ident, { ( $($param:ident),* $(,)? ) -> $ret:ident, nl: $nl:expr $(,)? }) => {
+        $t.declare_function(stringify!($func), vec![$($param),*], $ret, Some($nl))
+    };
+    ($t:ident, $func:ident, { ( $($param:ident),* $(,)? ) -> $ret:ident $(,)? }) => {
+        $t.declare_function(stringify!($func), vec![$($param),*], $ret, None::<String>)
+    };
+}
+
 macro_rules! theory_stmt {
     // ------------------------------------------------------------------
     // preamble!(str)
@@ -81,21 +105,32 @@ macro_rules! theory_stmt {
     };
 
     // ------------------------------------------------------------------
-    // predicates!(p(S1, S2), q(S), ...)
+    // predicates!(
+    //     p { (S1, S2), nl: "{0} ps {1}" },
+    //     q { (S) },                       // no NL template
+    //     ...
+    // )
+    //
+    // Each entry's contents are captured as a single token tree and dispatched
+    // to `predicate_decl!`, which has arms for the with-/without-`nl` forms.
     // ------------------------------------------------------------------
-    ($t:ident, predicates ! ($($pred:ident ( $($param:ident),* $(,)? )),* $(,)?)) => {
+    ($t:ident, predicates ! ($($pred:ident $body:tt),* $(,)?)) => {
         $(
-            let $pred = $t.declare_predicate(stringify!($pred), vec![$($param),*]);
+            let $pred = predicate_decl!($t, $pred, $body);
         )*
     };
 
     // ------------------------------------------------------------------
-    // functions!(f(S1, S2) -> R, ...)
+    // functions!(
+    //     f { (S1, S2) -> R, nl: "..." },
+    //     g { (S1) -> R },                 // no NL template
+    //     ...
+    // )
     // ------------------------------------------------------------------
-    ($t:ident, functions ! ($($func:ident ( $($param:ident),* $(,)? ) -> $ret:ident),* $(,)?)) => {
+    ($t:ident, functions ! ($($func:ident $body:tt),* $(,)?)) => {
         $(
             #[allow(unused_variables)]
-            let $func = $t.declare_function(stringify!($func), vec![$($param),*], $ret);
+            let $func = function_decl!($t, $func, $body);
         )*
     };
 

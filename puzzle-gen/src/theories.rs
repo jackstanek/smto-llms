@@ -82,6 +82,10 @@ pub struct SymbolDecl {
     id: SymbolId,
     name: String,
     signature: Option<Signature>,
+    /// Template used to render an application of this symbol in natural
+    /// language. Positional placeholders `{0}`, `{1}`, ... refer to the
+    /// argument names; `{ret}` refers to the return value (functions only).
+    nl_template: Option<String>,
 }
 
 impl SymbolDecl {
@@ -91,6 +95,10 @@ impl SymbolDecl {
 
     pub fn signature(&self) -> Option<&Signature> {
         self.signature.as_ref()
+    }
+
+    pub fn nl_template(&self) -> Option<&str> {
+        self.nl_template.as_deref()
     }
 }
 
@@ -338,25 +346,39 @@ impl Theory {
     }
 
     /// Add a  predicate to the theory.
-    pub fn declare_predicate(&mut self, name: impl Into<String>, params: Vec<SortId>) -> SymbolId {
+    pub fn declare_predicate<I>(
+        &mut self,
+        name: impl Into<String>,
+        params: Vec<SortId>,
+        nl_template: Option<I>,
+    ) -> SymbolId
+    where
+        I: Into<String>,
+    {
         self.symbols.insert_with_key(|id| SymbolDecl {
             id,
             name: name.into(),
             signature: Some(Signature::new_predicate(params)),
+            nl_template: nl_template.map(|t| t.into()),
         })
     }
 
     /// Add a function to the theory.
-    pub fn declare_function(
+    pub fn declare_function<I>(
         &mut self,
         name: impl Into<String>,
         params: Vec<SortId>,
         result: SortId,
-    ) -> SymbolId {
+        nl_template: Option<I>,
+    ) -> SymbolId
+    where
+        I: Into<String>,
+    {
         self.symbols.insert_with_key(|id| SymbolDecl {
             id,
             name: name.into(),
             signature: Some(Signature::new_function(params, result)),
+            nl_template: nl_template.map(|t| t.into()),
         })
     }
 
@@ -366,6 +388,7 @@ impl Theory {
             id,
             name: name.into(),
             signature: None,
+            nl_template: None,
         })
     }
 
@@ -732,13 +755,13 @@ mod tests {
             sorts!(employee, department);
 
             predicates!(
-                manages(employee, employee),
-                can_fire(employee, employee),
-                reports_to(employee, employee),
+                manages { (employee, employee), nl: "{0} manages {1}" },
+                can_fire { (employee, employee) },
+                reports_to { (employee, employee), nl: "{0} reports to {1}" },
             );
 
             functions!(
-                works_in(employee) -> department,
+                works_in { (employee) -> department, nl: "{0} works in {ret}" },
             );
 
             constants!(alice, bob, engineering);

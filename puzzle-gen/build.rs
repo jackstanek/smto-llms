@@ -57,7 +57,7 @@ fn main() -> Result<(), BuildError> {
     }
 
     let out_dir = env::var("OUT_DIR")?;
-    let dest_path = Path::new(&out_dir).join("names.rs");
+    let dest_path = Path::new(&out_dir).join("names_inner.rs");
     let f = OpenOptions::new()
         .write(true)
         .create(true)

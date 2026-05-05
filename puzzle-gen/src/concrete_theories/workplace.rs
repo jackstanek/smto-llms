@@ -38,6 +38,9 @@ use crate::theories::{
     Theory,
 };
 
+mod departments;
+mod names;
+
 /// Return a reference to the (lazily initialised) workplace `Theory`.
 ///
 /// The `Theory` is built once and stored in a process-wide static.  Subsequent

@@ -28,14 +28,17 @@
 //! let instance = theory.instantiate(domain);
 //! ```
 
-use std::{collections::VecDeque, sync::OnceLock};
+use std::cell::RefCell;
+use std::collections::{HashMap, VecDeque};
+use std::sync::OnceLock;
 
 use rand::{Rng, seq::IndexedRandom};
 use rand_distr::{Distribution, Poisson};
 
+use crate::rendering::{NameInitializer, NameMap};
 use crate::theories::{
-    Atom, ConstId, Formula, GroundModel, ModelGenerator, QueryGenerator, SortId, SymbolId, Term,
-    Theory,
+    Atom, ConstId, Formula, GroundModel, Instance, ModelGenerator, QueryGenerator, SortId,
+    SymbolId, Term, Theory,
 };
 
 mod departments;
@@ -74,8 +77,8 @@ where
 {
     fn generate(&mut self, model: &GroundModel<'static>) -> Formula {
         let t = model.theory();
-        let can_fire_sym = find_symbol(t, "can_fire");
-        let can_approve_sym = find_symbol(t, "can_approve_expense");
+        let can_fire_sym = t.find_symbol("can_fire");
+        let can_approve_sym = t.find_symbol("can_approve_expense");
 
         // Restrict to derived authority atoms so ablation exercises the oracle.
         let lfp = model.entailed_predicates();
@@ -219,7 +222,7 @@ fn build() -> Theory {
         horn! {
             name:     "chain_of_command_can_fire",
             implicit: true,
-            nl:       "Anyone up the chain of command can fire",
+            nl:       "Anyone up the chain of command can fire someone below them",
             forall (p: employee, r: employee, q: employee) {
                 body: manages(p, r), can_fire(r, q);
                 head: can_fire(p, q);
@@ -245,7 +248,7 @@ fn build() -> Theory {
         horn! {
             name:     "chain_of_command_can_approve",
             implicit: true,
-            nl:       "Anyone up the chain of command can approve expenses",
+            nl:       "Anyone up the chain of command can approve expenses for someone below them",
             forall (p: employee, r: employee, q: employee) {
                 body: manages(p, r), can_approve_expense(r, q);
                 head: can_approve_expense(p, q);
@@ -356,30 +359,16 @@ impl<R> WorkplaceGenerator<R> {
     }
 }
 
-fn find_sort(t: &Theory, name: &str) -> SortId {
-    t.sorts()
-        .find(|(_, s)| s.name() == name)
-        .map(|(id, _)| id)
-        .unwrap_or_else(|| panic!("workplace theory missing sort `{name}`"))
-}
-
-fn find_symbol(t: &Theory, name: &str) -> SymbolId {
-    t.symbols()
-        .find(|(_, s)| s.name() == name)
-        .map(|(id, _)| id)
-        .unwrap_or_else(|| panic!("workplace theory missing symbol `{name}`"))
-}
-
 impl<R> ModelGenerator<'static> for WorkplaceGenerator<R>
 where
     R: Rng,
 {
     fn generate(&mut self) -> GroundModel<'static> {
         let t = theory();
-        let employee_sort = find_sort(t, "employee");
-        let department_sort = find_sort(t, "department");
-        let manages_sym = find_symbol(t, "manages");
-        let works_in_sym = find_symbol(t, "works_in");
+        let employee_sort = t.find_sort("employee");
+        let department_sort = t.find_sort("department");
+        let manages_sym = t.find_symbol("manages");
+        let works_in_sym = t.find_symbol("works_in");
 
         let mut model = GroundModel::new(t);
 
@@ -414,6 +403,86 @@ where
         }
 
         model
+    }
+}
+
+/// Assigns pretty natural-language names to a workplace `Instance`'s domain
+/// constants. Stable names like `dept_0`, `head_2`, `emp_7` are mapped to
+/// real-sounding department names (Engineering, Finance, ...) and people
+/// names (Alice, Brianna, ...). The CEO becomes `"the CEO"`; each department
+/// head becomes `"the head of <pretty dept name>"`.
+pub struct WorkplaceNameInitializer<R> {
+    rng: RefCell<R>,
+}
+
+impl<R> WorkplaceNameInitializer<R> {
+    pub fn new(rng: R) -> Self {
+        Self {
+            rng: RefCell::new(rng),
+        }
+    }
+}
+
+impl<R> NameInitializer for WorkplaceNameInitializer<R>
+where
+    R: Rng,
+{
+    fn init_map(&self, instance: &Instance<'_>, map: &mut NameMap) {
+        let theory = instance.theory();
+        let employee_sort = theory.find_sort("employee");
+        let department_sort = theory.find_sort("department");
+
+        let mut depts: Vec<(usize, ConstId)> = Vec::new();
+        let mut heads: Vec<(usize, ConstId)> = Vec::new();
+        let mut emps: Vec<(usize, ConstId)> = Vec::new();
+        let mut ceo: Option<ConstId> = None;
+
+        for (id, decl) in instance.constants() {
+            let stable = decl.name();
+            if decl.sort() == department_sort {
+                if let Some(i) = stable.strip_prefix("dept_").and_then(|s| s.parse().ok()) {
+                    depts.push((i, id));
+                }
+            } else if decl.sort() == employee_sort {
+                if stable == "ceo" {
+                    ceo = Some(id);
+                } else if let Some(i) = stable.strip_prefix("head_").and_then(|s| s.parse().ok()) {
+                    heads.push((i, id));
+                } else if let Some(i) = stable.strip_prefix("emp_").and_then(|s| s.parse().ok()) {
+                    emps.push((i, id));
+                }
+            }
+        }
+
+        depts.sort_by_key(|(i, _)| *i);
+        heads.sort_by_key(|(i, _)| *i);
+        emps.sort_by_key(|(i, _)| *i);
+
+        let mut rng = self.rng.borrow_mut();
+
+        let dept_names = departments::random_balanced_names(&mut *rng, depts.len());
+        let mut dept_by_idx: HashMap<usize, String> = HashMap::new();
+        for (&(idx, id), name) in depts.iter().zip(dept_names.iter()) {
+            map.insert(id, name.to_string());
+            dept_by_idx.insert(idx, name.to_string());
+        }
+
+        if let Some(id) = ceo {
+            map.insert(id, "the CEO".to_string());
+        }
+
+        for &(idx, id) in &heads {
+            let pretty = dept_by_idx
+                .get(&idx)
+                .cloned()
+                .unwrap_or_else(|| format!("department {idx}"));
+            map.insert(id, format!("the head of {pretty}"));
+        }
+
+        let emp_names = names::random_balanced_names(&mut *rng, emps.len());
+        for (&(_, id), name) in emps.iter().zip(emp_names.iter()) {
+            map.insert(id, name.to_string());
+        }
     }
 }
 

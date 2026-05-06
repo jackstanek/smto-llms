@@ -9,22 +9,24 @@ use rig::providers::{gemini, ollama};
 use smtlib::Storage;
 use smtlib::backend::cvc5_binary::Cvc5Binary;
 
-#[macro_use]
-mod macros;
-mod concrete_theories;
-mod llm;
-mod pprint;
-mod solvers;
-mod theories;
-
 use crate::concrete_theories::workplace::{WorkplaceGenerator, WorkplaceQueryGenerator};
 use crate::llm::RendererAgent;
 use crate::pprint::{PrettyFormula, PrettyInstance};
+use crate::rendering::Renderer;
 use crate::solvers::{Backend, QueryResult, SmtBackend};
 use crate::theories::{
     AblationStrategy, AllAtOnceAblation, Formula, Instance, ModelGenerator, QueryGenerator,
     StochasticAblation,
 };
+
+#[macro_use]
+mod macros;
+mod concrete_theories;
+mod llm;
+mod pprint;
+mod rendering;
+mod solvers;
+mod theories;
 
 #[derive(Copy, Clone, Debug, ValueEnum)]
 enum AblationKind {
@@ -38,7 +40,7 @@ enum AblationKind {
 enum LLMProvider {
     /// Google Gemini backend (gemini-flash-3.0-preview by default)
     Gemini,
-    /// Ollama backend (gemma4 by default)
+    /// Ollama backend
     Ollama,
 }
 
@@ -114,6 +116,10 @@ struct Args {
     /// LLM backend to use for natural language rendering.
     #[arg(long, short, value_enum, default_value = "ollama")]
     llm_provider: LLMProvider,
+
+    /// Ollama local model to use
+    #[arg(long, default_value = "olmo-3:7b-instruct")]
+    ollama_model: String,
 }
 
 fn logger_setup(level: Option<Level>) -> anyhow::Result<()> {

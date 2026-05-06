@@ -35,6 +35,7 @@ new_key_type! {
 /// inhabits.
 #[derive(Debug, Clone)]
 pub struct ConstDecl {
+    /// Stable name of this constant, for instance for use by SMT solvers
     name: String,
     sort: SortId,
 }
@@ -221,6 +222,10 @@ impl Axiom {
     pub fn body(&self) -> &AxiomBody {
         &self.body
     }
+
+    pub fn natural_language(&self) -> &str {
+        self.meta.natural_language()
+    }
 }
 
 /// Axiom kind, determines whether it is an "implicit" (i.e. recoverable from a
@@ -278,6 +283,10 @@ impl AxiomMeta {
         &self.name
     }
 
+    pub fn natural_language(&self) -> &str {
+        &self.natural_language
+    }
+
     pub fn implicit_by_default(&self) -> bool {
         self.kind.is_implicit()
     }
@@ -301,6 +310,24 @@ impl Theory {
 
     pub fn sort(&self, id: SortId) -> &SortDecl {
         &self.sorts[id]
+    }
+
+    /// Locate the sort ID for a given sort name
+    pub fn find_sort(&self, name: &str) -> SortId {
+        self.sorts
+            .iter()
+            .find(|(_, s)| s.name() == name)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("No such sort {name}"))
+    }
+
+    /// Locate the symbol ID for a given symbol name
+    pub fn find_symbol(&self, name: &str) -> SymbolId {
+        self.symbols
+            .iter()
+            .find(|(_, s)| s.name() == name)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("No such sort {name}"))
     }
 
     pub fn symbols(&self) -> slotmap::basic::Iter<'_, SymbolId, SymbolDecl> {

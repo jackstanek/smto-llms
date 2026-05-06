@@ -7,7 +7,7 @@ use rig::{
     completion::{CompletionModel, Prompt},
 };
 
-use crate::{pprint::PrettyFormula, theories::Instance};
+use crate::{pprint::PrettyFormula, rendering::Renderer, theories::Instance};
 use crate::{pprint::PrettyInstance, theories::Formula};
 
 const RENDERER_SYSTEM_PROMPT: &'static str = "
@@ -52,13 +52,15 @@ where
             .build();
         Self { agent }
     }
+}
 
-    /// Render the instance as a logic puzzle.
-    pub async fn render<'t>(
-        &self,
-        query: &Formula,
-        instance: &Instance<'t>,
-    ) -> anyhow::Result<String> {
+impl<M> Renderer for RendererAgent<M>
+where
+    M: CompletionModel + 'static,
+{
+    type Error = anyhow::Error;
+
+    async fn render<'t>(&self, query: &Formula, instance: &Instance<'t>) -> anyhow::Result<String> {
         let mut buf = String::new();
         if let Some(preamble) = instance.preamble() {
             buf.extend(preamble.lines());

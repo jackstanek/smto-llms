@@ -1,21 +1,24 @@
+use std::fs::File;
+use std::io::{self, Write};
 use std::ops::ControlFlow;
+use std::path::PathBuf;
 
 use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
 use log::{Level, debug, info, trace};
 use rand::SeedableRng;
-use rig::client::Nothing;
-use rig::providers::{gemini, ollama};
 use smtlib::Storage;
 use smtlib::backend::cvc5_binary::Cvc5Binary;
 
-use crate::concrete_theories::workplace::{WorkplaceGenerator, WorkplaceQueryGenerator};
-use crate::llm::RendererAgent;
+use crate::concrete_theories::workplace::{
+    WorkplaceGenerator, WorkplaceNameInitializer, WorkplaceQueryGenerator,
+};
 use crate::pprint::{PrettyFormula, PrettyInstance};
 use crate::rendering::Renderer;
+use crate::rendering::template::TemplateRenderer;
 use crate::solvers::{Backend, QueryResult, SmtBackend};
 use crate::theories::{
-    AblationStrategy, AllAtOnceAblation, Formula, Instance, ModelGenerator, QueryGenerator,
+    AblationStrategy, AllAtOnceAblation, Instance, ModelGenerator, QueryGenerator,
     StochasticAblation,
 };
 
@@ -34,52 +37,6 @@ enum AblationKind {
     AllAtOnce,
     /// Drop one randomly-chosen implicit-by-default axiom per step.
     Stochastic,
-}
-
-#[derive(Copy, Clone, Debug, PartialEq, Eq, PartialOrd, Ord, ValueEnum)]
-enum LLMProvider {
-    /// Google Gemini backend (gemini-flash-3.0-preview by default)
-    Gemini,
-    /// Ollama backend
-    Ollama,
-}
-
-/// Provider-agnostic wrapper for RendererAgent
-#[derive(Clone)]
-enum AnyRendererAgent {
-    Gemini(RendererAgent<gemini::completion::CompletionModel>),
-    Ollama(RendererAgent<ollama::CompletionModel>),
-}
-
-impl TryFrom<LLMProvider> for AnyRendererAgent {
-    type Error = anyhow::Error;
-
-    fn try_from(value: LLMProvider) -> Result<Self, Self::Error> {
-        match value {
-            LLMProvider::Gemini => std::env::var("GEMINI_API_KEY")
-                .context("environment variable GEMINI_API_KEY not set")
-                .and_then(|api_key| {
-                    let client = gemini::Client::new(api_key)
-                        .context("couldn't construct Gemini API client")?;
-                    Ok(Self::Gemini(RendererAgent::new(
-                        client,
-                        gemini::completion::GEMINI_3_FLASH_PREVIEW,
-                    )))
-                }),
-            LLMProvider::Ollama => ollama::Client::new(Nothing)
-                .context("couldn't construct Ollama API client")
-                .map(|client| Self::Ollama(RendererAgent::new(client, "olmo-3:7b-instruct"))),
-        }
-    }
-}
-
-impl AnyRendererAgent {
-    async fn render<'t>(&self, query: &Formula, instance: &Instance<'t>) -> anyhow::Result<String> {
-        match self {
-            AnyRendererAgent::Gemini(agent) => agent.render(query, instance).await,
-            AnyRendererAgent::Ollama(agent) => agent.render(query, instance).await,
-        }
-    }
 }
 
 #[derive(Parser, Debug)]
@@ -113,13 +70,21 @@ struct Args {
     #[arg(long, default_value = "cvc5")]
     cvc5: String,
 
-    /// LLM backend to use for natural language rendering.
-    #[arg(long, short, value_enum, default_value = "ollama")]
-    llm_provider: LLMProvider,
+    /// Where to write the rendered puzzle. Use `-` (the default) for stdout.
+    /// Diagnostic logs always go to stderr regardless of this setting.
+    #[arg(long, short, default_value = "-")]
+    output: String,
+}
 
-    /// Ollama local model to use
-    #[arg(long, default_value = "olmo-3:7b-instruct")]
-    ollama_model: String,
+fn open_output(spec: &str) -> anyhow::Result<Box<dyn Write>> {
+    if spec == "-" {
+        Ok(Box::new(io::stdout().lock()))
+    } else {
+        let path = PathBuf::from(spec);
+        let file = File::create(&path)
+            .with_context(|| format!("couldn't open output file `{}`", path.display()))?;
+        Ok(Box::new(file))
+    }
 }
 
 fn logger_setup(level: Option<Level>) -> anyhow::Result<()> {
@@ -265,11 +230,20 @@ async fn main() -> anyhow::Result<()> {
         info!("{line}");
     }
 
-    let renderer = AnyRendererAgent::try_from(args.llm_provider)?;
+    let name_initializer = WorkplaceNameInitializer::new(rand::rngs::StdRng::seed_from_u64(
+        args.seed.wrapping_add(3),
+    ));
+    let renderer = TemplateRenderer::new(name_initializer);
     let nl_story = renderer.render(&query, &instance).await?;
-    for line in nl_story.lines() {
-        info!("{line}");
+
+    let mut sink = open_output(&args.output)?;
+    sink.write_all(nl_story.as_bytes())
+        .context("writing puzzle to output")?;
+    if !nl_story.ends_with('\n') {
+        sink.write_all(b"\n")
+            .context("writing puzzle trailing newline")?;
     }
+    sink.flush().context("flushing puzzle output")?;
 
     Ok(())
 }

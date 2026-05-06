@@ -37,8 +37,8 @@ use rand_distr::{Distribution, Poisson};
 
 use crate::rendering::{NameInitializer, NameMap};
 use crate::theories::{
-    Atom, ConstId, Formula, GroundModel, Instance, ModelGenerator, QueryGenerator, SortId,
-    SymbolId, Term, Theory,
+    Atom, ConstId, Formula, GroundModel, Instance, ModelGenerator, QueryGenerator, SymbolId, Term,
+    Theory,
 };
 
 mod departments;

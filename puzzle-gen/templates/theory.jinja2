@@ -1,5 +1,8 @@
 {{ preamble }}
 
+Facts
+=====
+
 We know the following facts:
 
 {% for fact in facts %}
@@ -8,10 +11,12 @@ We know the following facts:
 
 Rules
 =====
+
 {% for rule in rules %}
 - {{rule}}
 {% endfor %}
 
 Question
 ========
-{{ query }}
+
+Is it the case that {{ query }}?

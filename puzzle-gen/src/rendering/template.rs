@@ -10,7 +10,7 @@ use anyhow::{Context, anyhow};
 use askama::Template;
 
 use crate::rendering::{NameInitializer, NameMap, Renderer};
-use crate::theories::{Atom, AxiomBody, Formula, Instance, Term, Theory};
+use crate::theories::{Atom, Formula, Instance, Term, Theory};
 
 #[derive(Template)]
 #[template(path = "theory.jinja2")]
@@ -83,9 +83,9 @@ fn render_atom(theory: &Theory, names: &NameMap, atom: &Atom) -> anyhow::Result<
     match atom {
         Atom::Predicate { symbol, args } => {
             let decl = theory.symbol(*symbol);
-            let template = decl.nl_template().ok_or_else(|| {
-                anyhow!("predicate `{}` has no nl_template", decl.name())
-            })?;
+            let template = decl
+                .nl_template()
+                .ok_or_else(|| anyhow!("predicate `{}` has no nl_template", decl.name()))?;
             let arg_names = args
                 .iter()
                 .map(|t| resolve_term(names, t))
@@ -95,9 +95,9 @@ fn render_atom(theory: &Theory, names: &NameMap, atom: &Atom) -> anyhow::Result<
         Atom::Eq(lhs, rhs) => match (lhs, rhs) {
             (Term::App { symbol, args }, value) => {
                 let decl = theory.symbol(*symbol);
-                let template = decl.nl_template().ok_or_else(|| {
-                    anyhow!("function `{}` has no nl_template", decl.name())
-                })?;
+                let template = decl
+                    .nl_template()
+                    .ok_or_else(|| anyhow!("function `{}` has no nl_template", decl.name()))?;
                 let arg_names = args
                     .iter()
                     .map(|t| resolve_term(names, t))
@@ -144,9 +144,9 @@ fn render_formula(theory: &Theory, names: &NameMap, formula: &Formula) -> anyhow
             render_formula(theory, names, p)?,
             render_formula(theory, names, q)?
         )),
-        Formula::Forall(_, _) | Formula::Exists(_, _) => {
-            Err(anyhow!("quantified formulas are not yet supported in prose rendering"))
-        }
+        Formula::Forall(_, _) | Formula::Exists(_, _) => Err(anyhow!(
+            "quantified formulas are not yet supported in prose rendering"
+        )),
     }
 }
 

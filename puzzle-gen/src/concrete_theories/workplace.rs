@@ -174,7 +174,7 @@ fn build() -> Theory {
         horn! {
             name:     "direct_manager_can_fire",
             implicit: true,
-            nl:       "Managers can fire their direct reports",
+            nl:       "Managers can fire their direct reports.",
             forall (p: employee, q: employee) {
                 body: manages(p, q);
                 head: can_fire(p, q);
@@ -190,7 +190,8 @@ fn build() -> Theory {
         horn! {
             name:     "chain_of_command_can_fire",
             implicit: true,
-            nl:       "Anyone up the chain of command can fire someone below them",
+            nl: "If a manager has a report who can fire someone else, then the \
+                 manager can also fire that other person.",
             forall (p: employee, r: employee, q: employee) {
                 body: manages(p, r), can_fire(r, q);
                 head: can_fire(p, q);
@@ -203,7 +204,7 @@ fn build() -> Theory {
         horn! {
             name:     "direct_manager_can_approve",
             implicit: true,
-            nl:       "Direct managers can approve their reports' expenses",
+            nl:       "Direct managers can approve their reports' expenses.",
             forall (p: employee, q: employee) {
                 body: manages(p, q);
                 head: can_approve_expense(p, q);
@@ -216,7 +217,9 @@ fn build() -> Theory {
         horn! {
             name:     "chain_of_command_can_approve",
             implicit: true,
-            nl:       "Anyone up the chain of command can approve expenses for someone below them",
+            nl: "If a manager has a report who can approve expenses for someone \
+                 else, then the manager can also approve expenses for that other \
+                 person.",
             forall (p: employee, r: employee, q: employee) {
                 body: manages(p, r), can_approve_expense(r, q);
                 head: can_approve_expense(p, q);
@@ -229,7 +232,7 @@ fn build() -> Theory {
         horn! {
             name:     "fired_implies_authority",
             implicit: false,
-            nl:       "If p fired q then p had authority to do so",
+            nl:       "If p fired q, then p had authority to do so.",
             forall (p: employee, q: employee) {
                 body: fired(p, q);
                 head: can_fire(p, q);
@@ -242,7 +245,7 @@ fn build() -> Theory {
         horn! {
             name:     "approved_implies_authority",
             implicit: false,
-            nl:       "If p approved q's expense then p had authority to do so",
+            nl:       "If p approved q's expense, then p had authority to do so.",
             forall (p: employee, q: employee) {
                 body: approved_expense(p, q);
                 head: can_approve_expense(p, q);
@@ -255,7 +258,7 @@ fn build() -> Theory {
         integrity! {
             name:     "no_self_fire",
             implicit: true,
-            nl:       "No one can fire themselves",
+            nl:       "No one can fire themselves.",
             forall (p: employee) {
                 body: can_fire(p, p);
             }
@@ -268,7 +271,7 @@ fn build() -> Theory {
         integrity! {
             name:     "no_self_approve",
             implicit: true,
-            nl:       "No one can approve their own expenses",
+            nl:       "No one can approve their own expenses.",
             forall (p: employee) {
                 body: can_approve_expense(p, p);
             }

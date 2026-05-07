@@ -32,7 +32,7 @@ use std::cell::RefCell;
 use std::collections::{HashMap, VecDeque};
 use std::sync::OnceLock;
 
-use rand::{Rng, seq::IndexedRandom};
+use rand::{Rng, RngExt, seq::IndexedRandom};
 use rand_distr::{Distribution, Poisson};
 
 use crate::rendering::{NameInitializer, NameMap};
@@ -55,12 +55,19 @@ pub fn theory() -> &'static Theory {
 
 /// Sampler for workplace puzzle queries.
 ///
-/// Picks a uniformly-random ordered pair of distinct employees and a
-/// uniformly-random *derived* authority predicate (`can_fire` or
-/// `can_approve_expense`). Restricted to derived predicates because
-/// non-derived ones (e.g. `manages`) are decided directly by the ground facts
-/// regardless of which axioms remain active, so ablation would have no effect
-/// on them and the puzzle would not exercise the implicit theory.
+/// Picks an authority predicate (`can_fire` or `can_approve_expense`) and an
+/// ordered pair of employees. Two flavors, sampled with equal probability:
+///
+/// - **Yes-query**: a derived authority atom from the LFP. Ground-truth
+///   answer is "yes" (entailed); ablating a load-bearing Horn axiom can
+///   render it underdetermined.
+/// - **No-query**: a self-pair `pred(p, p)`, forbidden by the
+///   `no_self_fire` / `no_self_approve` integrity axioms. Ground-truth
+///   answer is "no" (refuted); ablating the relevant integrity axiom
+///   renders it underdetermined.
+///
+/// Both flavors restrict to derived predicates so the puzzle exercises the
+/// implicit theory.
 pub struct WorkplaceQueryGenerator<R> {
     rng: R,
 }
@@ -80,28 +87,48 @@ where
         let can_fire_sym = t.find_symbol("can_fire");
         let can_approve_sym = t.find_symbol("can_approve_expense");
 
-        // Restrict to derived authority atoms so ablation exercises the oracle.
-        let lfp = model.entailed_predicates();
-        let derived: Vec<(SymbolId, ConstId, ConstId)> = lfp
-            .iter()
-            .filter_map(|(sym, args)| {
-                if (*sym == can_fire_sym || *sym == can_approve_sym)
-                    && args.len() == 2
-                    && args[0] != args[1]
-                {
-                    Some((*sym, args[0], args[1]))
-                } else {
-                    None
-                }
-            })
-            .collect();
+        let yes_query = self.rng.random_bool(0.5);
+        let (sym, p, q) = if yes_query {
+            let lfp = model.entailed_predicates();
+            let derived: Vec<(SymbolId, ConstId, ConstId)> = lfp
+                .iter()
+                .filter_map(|(s, args)| {
+                    if (*s == can_fire_sym || *s == can_approve_sym)
+                        && args.len() == 2
+                        && args[0] != args[1]
+                    {
+                        Some((*s, args[0], args[1]))
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            assert!(
+                !derived.is_empty(),
+                "no derived authority atoms — cannot generate a yes-query"
+            );
+            *derived.choose(&mut self.rng).unwrap()
+        } else {
+            // Self-pair: forbidden by no_self_fire / no_self_approve.
+            let employee_sort = t.find_sort("employee");
+            let employees: &[ConstId] = model
+                .domain()
+                .get(&employee_sort)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
+            assert!(
+                !employees.is_empty(),
+                "no employees in domain — cannot generate a no-query"
+            );
+            let &p = employees.choose(&mut self.rng).unwrap();
+            let sym = if self.rng.random_bool(0.5) {
+                can_fire_sym
+            } else {
+                can_approve_sym
+            };
+            (sym, p, p)
+        };
 
-        assert!(
-            !derived.is_empty(),
-            "no derived authority atoms — cannot generate a meaningful query"
-        );
-
-        let &(sym, p, q) = derived.choose(&mut self.rng).unwrap();
         Formula::Atom(Atom::Predicate {
             symbol: sym,
             args: vec![Term::DomainConst(p), Term::DomainConst(q)],

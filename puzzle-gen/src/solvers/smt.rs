@@ -11,8 +11,8 @@ use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 
 use crate::solvers::{Backend, QueryResult};
 use crate::theories::{
-    Atom, Axiom, AxiomBody, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId, body_holds,
-    enumerate_bindings, eval_term,
+    Atom, Axiom, AxiomBody, AxiomId, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
+    body_holds, enumerate_bindings, eval_term,
 };
 
 /// Set an option for the solver.
@@ -124,35 +124,90 @@ fn compute_lfp(instance: &Instance<'_>) -> HashSet<(SymbolId, Vec<ConstId>)> {
 pub struct SmtBackend<'st, B: smtlib::Backend> {
     st: &'st smtlib::Storage,
     solver: smtlib::Solver<'st, B>,
-    // True after the first load_instance call; sorts/symbols/consts are permanent.
-    declarations_done: bool,
-    // True when a per-instance assertion scope is currently pushed.
-    instance_scope_active: bool,
-    // Translation state, populated on first load_instance and reused thereafter.
+    // True after load_instance has run; calling it again is an error.
+    loaded: bool,
+    // Translation state, populated by load_instance.
     smt_sorts: HashMap<SortId, smtlib::sorts::Sort<'st>>,
     smt_consts: HashMap<SymbolId, Dynamic<'st>>,
     smt_domain_consts: HashMap<ConstId, Dynamic<'st>>,
     smt_fun_names: HashMap<SymbolId, &'st str>,
     smt_fun_ret_sorts: HashMap<SymbolId, smtlib::sorts::Sort<'st>>,
+    // Activator-literal name per theory axiom, in declaration order. Each
+    // axiom is asserted as `(=> activator axiom)`; pinning the activator
+    // turns the axiom on/off without re-asserting. A Vec rather than HashMap
+    // because cvc5 is sensitive to assertion order — non-deterministic
+    // iteration introduces large run-to-run variance in solve time.
+    axiom_activators: Vec<(AxiomId, &'st str)>,
+    // Currently-active axioms (mirrors the latest Instance's set).
+    active_axioms: HashSet<AxiomId>,
+    // Ground predicate atoms whose negation has already been asserted under
+    // CWA. Grows monotonically as ablation shrinks the LFP.
+    cwa_negated: HashSet<(SymbolId, Vec<ConstId>)>,
 }
 
 impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
     pub fn new(st: &'st smtlib::Storage, backend: B) -> Result<Self, smtlib::Error> {
         let mut solver = smtlib::Solver::new(st, backend)?;
         trace!("constructed solver");
+        if std::env::var("PUZZLE_GEN_SMT_TRACE").is_ok() {
+            solver.set_logger((
+                |cmd: smtlib::lowlevel::ast::Command| eprintln!(">> {cmd}"),
+                |_cmd: smtlib::lowlevel::ast::Command, res: &str| eprintln!("<< {res}"),
+            ));
+        }
         configure_solver(&mut solver)?;
         trace!("configured solver");
         Ok(Self {
             st,
             solver,
-            declarations_done: false,
-            instance_scope_active: false,
+            loaded: false,
             smt_sorts: HashMap::new(),
             smt_consts: HashMap::new(),
             smt_domain_consts: HashMap::new(),
             smt_fun_names: HashMap::new(),
             smt_fun_ret_sorts: HashMap::new(),
+            axiom_activators: Vec::new(),
+            active_axioms: HashSet::new(),
+            cwa_negated: HashSet::new(),
         })
+    }
+
+    /// Assert CWA negations for ground predicate atoms not in `lfp` and not
+    /// yet negated. Returns the number of new negations asserted.
+    fn extend_cwa(
+        &mut self,
+        instance: &Instance<'_>,
+        lfp: &HashSet<(SymbolId, Vec<ConstId>)>,
+    ) -> Result<usize, smtlib::Error> {
+        let theory = instance.theory();
+        let empty_var_map = HashMap::new();
+        let mut added = 0;
+        // Collect first to avoid borrowing self while iterating theory symbols.
+        let mut new_negations: Vec<(SymbolId, Vec<ConstId>)> = Vec::new();
+        for (id, decl) in theory.symbols() {
+            if let Some(sig) = decl.signature() {
+                if sig.ret().is_some() {
+                    continue;
+                }
+                for args in enumerate_ground_tuples(sig.params(), instance.domain()) {
+                    let key = (id, args);
+                    if !lfp.contains(&key) && !self.cwa_negated.contains(&key) {
+                        new_negations.push(key);
+                    }
+                }
+            }
+        }
+        for key in new_negations {
+            let atom = Atom::Predicate {
+                symbol: key.0,
+                args: key.1.iter().copied().map(Term::DomainConst).collect(),
+            };
+            let b = self.translate_atom(&atom, &empty_var_map);
+            self.solver.assert(!b)?;
+            self.cwa_negated.insert(key);
+            added += 1;
+        }
+        Ok(added)
     }
 
     /// Build an SMT-LIB function/predicate application term.
@@ -387,86 +442,64 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
     type Error = smtlib::Error;
 
     fn load_instance(&mut self, instance: &Instance<'_>) -> Result<(), Self::Error> {
+        assert!(
+            !self.loaded,
+            "SmtBackend::load_instance called twice; use set_active_axioms for ablation"
+        );
         trace!("loading instance");
         let theory = instance.theory();
 
-        // Pop the previous instance's assertion scope (if any) to clear all
-        // per-instance assertions. Declarations are permanent and survive this.
-        if self.instance_scope_active {
-            self.solver
-                .run_command(ast::Command::Pop(lexicon::Numeral::from_usize(1)))?;
-            self.instance_scope_active = false;
+        trace!("declaring sorts");
+        // 1. Register sort descriptors (no solver command; sorts are declared
+        //    implicitly when first used in declare_fun).
+        for (id, decl) in theory.sorts() {
+            let name = self.st.alloc_str(decl.name());
+            let sort = smtlib::sorts::Sort::Dynamic {
+                st: self.st,
+                name,
+                index: &[],
+                parameters: &[],
+            };
+            self.smt_sorts.insert(id, sort);
         }
 
-        if !self.declarations_done {
-            // First call only: declare sorts, domain constants, and symbols.
-            // These are permanent — they survive pop and must not be re-sent.
+        trace!("declaring domain constants");
+        // 2. Declare domain constants via declare_fun (0-arity).
+        for (sort_id, constants) in instance.domain() {
+            let sort = self.smt_sorts[sort_id];
+            for &const_id in constants {
+                let const_name = instance.constant(const_id).name();
+                let fun = smtlib::funs::Fun::new(self.st, const_name, vec![], sort);
+                self.solver.declare_fun(&fun)?;
+                let name = self.st.alloc_str(const_name);
+                let qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(
+                    lexicon::Symbol(name),
+                ));
+                let dynamic =
+                    Dynamic::from_term_sort(STerm::new(self.st, ast::Term::Identifier(qi)), sort);
+                self.smt_domain_consts.insert(const_id, dynamic);
+            }
+        }
 
-            trace!("declaring sorts");
-            // 1. Register sort descriptors (no solver command; sorts are
-            //    declared implicitly when first used in declare_fun).
-            for (id, decl) in theory.sorts() {
+        trace!("declaring predicate/function symbols");
+        // 3. Declare predicate / function symbols.
+        for (id, decl) in theory.symbols() {
+            if let Some(sig) = decl.signature() {
                 let name = self.st.alloc_str(decl.name());
-                let sort = smtlib::sorts::Sort::Dynamic {
-                    st: self.st,
-                    name,
-                    index: &[],
-                    parameters: &[],
+                self.smt_fun_names.insert(id, name);
+
+                let param_sorts: Vec<smtlib::sorts::Sort<'st>> =
+                    sig.params().iter().map(|s| self.smt_sorts[s]).collect();
+                let ret_sort = match sig.ret() {
+                    None => smtlib::sorts::Sort::Static(smtlib::Bool::AST_SORT),
+                    Some(s) => self.smt_sorts[&s],
                 };
-                self.smt_sorts.insert(id, sort);
+                self.smt_fun_ret_sorts.insert(id, ret_sort);
+
+                let fun = smtlib::funs::Fun::new(self.st, decl.name(), param_sorts, ret_sort);
+                self.solver.declare_fun(&fun)?;
             }
-
-            trace!("declaring domain constants");
-            // 2. Declare domain constants explicitly via declare_fun (0-arity)
-            //    so the declarations reach the solver before any push scope.
-            //    Using sort.new_const would lazily emit declare-const on first
-            //    assert use, which would land inside the scope and get popped.
-            for (sort_id, constants) in instance.domain() {
-                let sort = self.smt_sorts[sort_id];
-                for &const_id in constants {
-                    let const_name = instance.constant(const_id).name();
-                    let fun = smtlib::funs::Fun::new(self.st, const_name, vec![], sort);
-                    self.solver.declare_fun(&fun)?;
-                    let name = self.st.alloc_str(const_name);
-                    let qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(
-                        lexicon::Symbol(name),
-                    ));
-                    let dynamic = Dynamic::from_term_sort(
-                        STerm::new(self.st, ast::Term::Identifier(qi)),
-                        sort,
-                    );
-                    self.smt_domain_consts.insert(const_id, dynamic);
-                }
-            }
-
-            trace!("declaring predicate/function symbols");
-            // 3. Declare predicate / function symbols.
-            for (id, decl) in theory.symbols() {
-                if let Some(sig) = decl.signature() {
-                    let name = self.st.alloc_str(decl.name());
-                    self.smt_fun_names.insert(id, name);
-
-                    let param_sorts: Vec<smtlib::sorts::Sort<'st>> =
-                        sig.params().iter().map(|s| self.smt_sorts[s]).collect();
-                    let ret_sort = match sig.ret() {
-                        None => smtlib::sorts::Sort::Static(smtlib::Bool::AST_SORT),
-                        Some(s) => self.smt_sorts[&s],
-                    };
-                    self.smt_fun_ret_sorts.insert(id, ret_sort);
-
-                    let fun = smtlib::funs::Fun::new(self.st, decl.name(), param_sorts, ret_sort);
-                    self.solver.declare_fun(&fun)?;
-                }
-            }
-
-            self.declarations_done = true;
         }
-
-        // Push a fresh scope for this instance's assertions. Everything
-        // asserted below will be cleared when this scope is popped.
-        self.solver
-            .run_command(ast::Command::Push(lexicon::Numeral::from_usize(1)))?;
-        self.instance_scope_active = true;
 
         let empty_var_map = HashMap::new();
 
@@ -486,8 +519,6 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
                 self.solver.assert(self.to_bool(distinct))?;
             }
 
-            // Coverage axiom: tells the solver the sort has *exactly* these
-            // constants, making quantifier instantiation finite.
             if !const_dynamics.is_empty() {
                 let var_name = self.st.alloc_str("_cov");
                 let var_binder = ast::SortedVar(lexicon::Symbol(var_name), sort.ast());
@@ -514,37 +545,61 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             self.solver.assert(b)?;
         }
 
-        // 6. Assert active axioms.
-        trace!("asserting active axioms");
-        for &axiom_id in instance.active_axioms() {
-            let axiom = theory.axiom(axiom_id);
-            let b = self.translate_axiom(axiom);
-            self.solver.assert(b)?;
+        // 6. Declare an activator boolean per theory axiom and assert
+        //    `(=> activator axiom)`. Toggling the activator via
+        //    check-sat-assuming turns the axiom on/off without re-asserting.
+        trace!("declaring axiom activators");
+        let bool_sort = smtlib::sorts::Sort::Static(smtlib::Bool::AST_SORT);
+        for (axiom_id, axiom) in theory.axioms() {
+            let act_name = self.st.alloc_str(&format!("_act_a{}", self.axiom_activators.len()));
+            let fun = smtlib::funs::Fun::new(self.st, act_name, vec![], bool_sort);
+            self.solver.declare_fun(&fun)?;
+            self.axiom_activators.push((axiom_id, act_name));
+
+            let act_qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(
+                lexicon::Symbol(act_name),
+            ));
+            let act_bool = self.to_bool(ast::Term::Identifier(act_qi));
+            let axiom_bool = self.translate_axiom(axiom);
+            self.solver.assert(act_bool.implies(axiom_bool))?;
         }
 
-        // 7. Assert CWA negations: for every ground predicate atom not in the
-        //    LFP of the active Horn axioms, assert its negation.
+        // 7. Assert CWA negations for atoms not in the LFP of the initial
+        //    active axiom set.
         trace!("computing LFP for CWA");
         let lfp = compute_lfp(instance);
         trace!("asserting CWA negations ({} atoms in LFP)", lfp.len());
-        for (id, decl) in theory.symbols() {
-            if let Some(sig) = decl.signature() {
-                if sig.ret().is_some() {
-                    continue; // skip functions; CWA applies only to predicates
-                }
-                for args in enumerate_ground_tuples(sig.params(), instance.domain()) {
-                    if !lfp.contains(&(id, args.clone())) {
-                        let atom = Atom::Predicate {
-                            symbol: id,
-                            args: args.into_iter().map(Term::DomainConst).collect(),
-                        };
-                        let b = self.translate_atom(&atom, &empty_var_map);
-                        self.solver.assert(!b)?;
-                    }
-                }
-            }
+        self.extend_cwa(instance, &lfp)?;
+
+        self.active_axioms = instance.active_axioms().clone();
+        self.loaded = true;
+        Ok(())
+    }
+
+    fn set_active_axioms(&mut self, instance: &Instance<'_>) -> Result<(), Self::Error> {
+        assert!(self.loaded, "set_active_axioms called before load_instance");
+        let new_active = instance.active_axioms();
+        debug_assert!(
+            new_active.is_subset(&self.active_axioms),
+            "monotone-ablation invariant violated: new active set must be a subset of the previous"
+        );
+
+        if new_active.len() == self.active_axioms.len() {
+            return Ok(());
         }
 
+        // Recompute LFP under the now-smaller active set and add negations
+        // for atoms that have dropped out.
+        let lfp = compute_lfp(instance);
+        let added = self.extend_cwa(instance, &lfp)?;
+        trace!(
+            "set_active_axioms: {} axioms now active ({} dropped); {} new CWA negations",
+            new_active.len(),
+            self.active_axioms.len() - new_active.len(),
+            added,
+        );
+
+        self.active_axioms = new_active.clone();
         Ok(())
     }
 
@@ -557,8 +612,29 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         trace!("starting entailment check");
         let q = self.translate_formula(query, &HashMap::new());
 
+        // Pin each activator literal positively or negatively for this check.
+        // (`check-sat-assuming` would be the natural fit, but smtlib 0.3.0's
+        // `PropLiteral` Display impl is buggy and prints both variants
+        // identically, so we use plain bool asserts inside a push/pop scope
+        // instead. Still much cheaper than re-translating the axioms each
+        // step.)
+        let mut activator_pins: Vec<smtlib::Bool<'st>> =
+            Vec::with_capacity(self.axiom_activators.len());
+        for &(axiom_id, name) in &self.axiom_activators {
+            let qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
+            let act_bool = self.to_bool(ast::Term::Identifier(qi));
+            if self.active_axioms.contains(&axiom_id) {
+                activator_pins.push(act_bool);
+            } else {
+                activator_pins.push(!act_bool);
+            }
+        }
+
         // T union F union {not q} unsat  =>  q is entailed.
         let entailed = self.solver.scope(|solver| {
+            for pin in &activator_pins {
+                solver.assert(*pin)?;
+            }
             solver.assert(!q)?;
             solver.check_sat()
         })?;
@@ -568,6 +644,9 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
 
         // T union F union {q} unsat  =>  not-q is entailed (q is refuted).
         let refuted = self.solver.scope(|solver| {
+            for pin in &activator_pins {
+                solver.assert(*pin)?;
+            }
             solver.assert(q)?;
             solver.check_sat()
         })?;

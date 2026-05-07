@@ -23,13 +23,20 @@ pub trait Backend {
     type Error;
 
     /// Load the instance: declare sorts, domain elements, symbols, then assert
-    /// ground facts and active axioms.
+    /// ground facts and axioms (gated on per-axiom activator literals).
+    /// Must be called exactly once per backend.
     fn load_instance(&mut self, instance: &Instance<'_>) -> Result<(), Self::Error>;
+
+    /// Sync the backend's active-axiom set with `instance.active_axioms()`.
+    /// Cheap incremental ablation: flips activator literals in-memory and
+    /// extends the CWA negation set as the LFP shrinks. Assumes the active
+    /// set only ever shrinks across calls (monotone ablation).
+    fn set_active_axioms(&mut self, instance: &Instance<'_>) -> Result<(), Self::Error>;
 
     /// Assert an additional axiom (e.g. one recovered from the oracle).
     fn assert_axiom(&mut self, axiom: &Axiom) -> Result<(), Self::Error>;
 
     /// Check whether a formula is entailed, refuted, or undetermined under the
-    /// currently loaded instance.
+    /// currently loaded instance and active axiom set.
     fn check_entailment(&mut self, query: &Formula) -> Result<QueryResult, Self::Error>;
 }

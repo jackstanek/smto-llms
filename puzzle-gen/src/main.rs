@@ -181,8 +181,8 @@ async fn main() -> anyhow::Result<()> {
         let cf = strategy.ablate(&mut instance);
         step += 1;
         backend
-            .load_instance(&instance)
-            .with_context(|| format!("reloading instance after ablation step {step}"))?;
+            .set_active_axioms(&instance)
+            .with_context(|| format!("syncing active axioms after ablation step {step}"))?;
         let status = backend
             .check_entailment(&query)
             .with_context(|| format!("entailment check at step {step}"))?;

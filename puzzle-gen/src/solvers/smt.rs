@@ -12,7 +12,6 @@ use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 use crate::solvers::{Backend, QueryResult};
 use crate::theories::{
     Atom, Axiom, AxiomBody, AxiomId, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
-    body_holds, enumerate_bindings, eval_term,
 };
 
 /// Set an option for the solver.
@@ -40,82 +39,6 @@ fn configure_solver<'st, B: smtlib::Backend>(
     Ok(())
 }
 
-// -- Closed-world helpers --------------------------------------------------
-
-/// Enumerate all ground tuples for a sequence of sort IDs.
-fn enumerate_ground_tuples(
-    sorts: &[SortId],
-    domain: &HashMap<SortId, Vec<ConstId>>,
-) -> Vec<Vec<ConstId>> {
-    sorts.iter().fold(vec![vec![]], |acc, &sort| {
-        let consts = domain.get(&sort).map_or(&[] as &[ConstId], Vec::as_slice);
-        acc.into_iter()
-            .flat_map(|t| {
-                consts.iter().map(move |&c| {
-                    let mut t = t.clone();
-                    t.push(c);
-                    t
-                })
-            })
-            .collect()
-    })
-}
-
-/// Compute the least fixed point (LFP) of the active Horn axioms over the
-/// finite domain. Naïve forward-chaining: iterate until no new atoms are
-/// derived. Returns the set of all ground predicate atoms that hold.
-fn compute_lfp(instance: &Instance<'_>) -> HashSet<(SymbolId, Vec<ConstId>)> {
-    let theory = instance.theory();
-    let domain = instance.domain();
-
-    // Seed with explicit positive ground predicate facts.
-    let mut lfp: HashSet<(SymbolId, Vec<ConstId>)> = instance
-        .facts()
-        .iter()
-        .filter_map(|atom| match atom {
-            Atom::Predicate { symbol, args } => args
-                .iter()
-                .map(|t| match t {
-                    Term::DomainConst(c) => Some(*c),
-                    _ => None,
-                })
-                .collect::<Option<Vec<_>>>()
-                .map(|cs| (*symbol, cs)),
-            _ => None,
-        })
-        .collect();
-
-    loop {
-        let mut added = false;
-        for &axiom_id in instance.active_axioms() {
-            let axiom = theory.axiom(axiom_id);
-            if let AxiomBody::Horn { body, head } = axiom.body()
-                && let Atom::Predicate {
-                    symbol: head_sym,
-                    args: head_args,
-                } = head
-            {
-                for binding in enumerate_bindings(axiom.vars(), domain) {
-                    if body_holds(body, &binding, &lfp) {
-                        let ground: Option<Vec<ConstId>> =
-                            head_args.iter().map(|t| eval_term(t, &binding)).collect();
-                        if let Some(args) = ground
-                            && lfp.insert((*head_sym, args))
-                        {
-                            added = true;
-                        }
-                    }
-                }
-            }
-        }
-        if !added {
-            break;
-        }
-    }
-
-    lfp
-}
-
 /// Backend over SMT-LIB compatible solvers.
 ///
 /// The `Storage` must outlive the backend; the caller owns it and passes a
@@ -140,9 +63,6 @@ pub struct SmtBackend<'st, B: smtlib::Backend> {
     axiom_activators: Vec<(AxiomId, &'st str)>,
     // Currently-active axioms (mirrors the latest Instance's set).
     active_axioms: HashSet<AxiomId>,
-    // Ground predicate atoms whose negation has already been asserted under
-    // CWA. Grows monotonically as ablation shrinks the LFP.
-    cwa_negated: HashSet<(SymbolId, Vec<ConstId>)>,
 }
 
 impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
@@ -168,46 +88,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             smt_fun_ret_sorts: HashMap::new(),
             axiom_activators: Vec::new(),
             active_axioms: HashSet::new(),
-            cwa_negated: HashSet::new(),
         })
-    }
-
-    /// Assert CWA negations for ground predicate atoms not in `lfp` and not
-    /// yet negated. Returns the number of new negations asserted.
-    fn extend_cwa(
-        &mut self,
-        instance: &Instance<'_>,
-        lfp: &HashSet<(SymbolId, Vec<ConstId>)>,
-    ) -> Result<usize, smtlib::Error> {
-        let theory = instance.theory();
-        let empty_var_map = HashMap::new();
-        let mut added = 0;
-        // Collect first to avoid borrowing self while iterating theory symbols.
-        let mut new_negations: Vec<(SymbolId, Vec<ConstId>)> = Vec::new();
-        for (id, decl) in theory.symbols() {
-            if let Some(sig) = decl.signature() {
-                if sig.ret().is_some() {
-                    continue;
-                }
-                for args in enumerate_ground_tuples(sig.params(), instance.domain()) {
-                    let key = (id, args);
-                    if !lfp.contains(&key) && !self.cwa_negated.contains(&key) {
-                        new_negations.push(key);
-                    }
-                }
-            }
-        }
-        for key in new_negations {
-            let atom = Atom::Predicate {
-                symbol: key.0,
-                args: key.1.iter().copied().map(Term::DomainConst).collect(),
-            };
-            let b = self.translate_atom(&atom, &empty_var_map);
-            self.solver.assert(!b)?;
-            self.cwa_negated.insert(key);
-            added += 1;
-        }
-        Ok(added)
     }
 
     /// Build an SMT-LIB function/predicate application term.
@@ -564,12 +445,9 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             self.solver.assert(act_bool.implies(axiom_bool))?;
         }
 
-        // 7. Assert CWA negations for atoms not in the LFP of the initial
-        //    active axiom set.
-        trace!("computing LFP for CWA");
-        let lfp = compute_lfp(instance);
-        trace!("asserting CWA negations ({} atoms in LFP)", lfp.len());
-        self.extend_cwa(instance, &lfp)?;
+        // The SMT backend is open-world: it does not assert CWA negations.
+        // Closed-world reasoning is the responsibility of backends whose
+        // semantics demand it (e.g. a future datalog backend).
 
         self.active_axioms = instance.active_axioms().clone();
         self.loaded = true;
@@ -583,22 +461,11 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             new_active.is_subset(&self.active_axioms),
             "monotone-ablation invariant violated: new active set must be a subset of the previous"
         );
-
-        if new_active.len() == self.active_axioms.len() {
-            return Ok(());
-        }
-
-        // Recompute LFP under the now-smaller active set and add negations
-        // for atoms that have dropped out.
-        let lfp = compute_lfp(instance);
-        let added = self.extend_cwa(instance, &lfp)?;
         trace!(
-            "set_active_axioms: {} axioms now active ({} dropped); {} new CWA negations",
+            "set_active_axioms: {} axioms now active ({} dropped)",
             new_active.len(),
             self.active_axioms.len() - new_active.len(),
-            added,
         );
-
         self.active_axioms = new_active.clone();
         Ok(())
     }

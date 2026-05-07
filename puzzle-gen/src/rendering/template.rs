@@ -13,7 +13,7 @@ use crate::rendering::{NameInitializer, NameMap, Renderer};
 use crate::theories::{Atom, Formula, Instance, Term, Theory};
 
 #[derive(Template)]
-#[template(path = "theory.jinja2")]
+#[template(path = "theory.txt")]
 struct TheoryTemplate {
     preamble: String,
     facts: Vec<String>,

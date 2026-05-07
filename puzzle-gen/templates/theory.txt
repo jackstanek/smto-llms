@@ -5,14 +5,14 @@ Facts
 
 We know the following facts:
 
-{% for fact in facts %}
+{% for fact in facts -%}
 - {{fact}}
 {% endfor %}
 
 Rules
 =====
 
-{% for rule in rules %}
+{% for rule in rules -%}
 - {{rule}}
 {% endfor %}
 

@@ -69,12 +69,172 @@
 // ---------------------------------------------------------------------------
 
 macro_rules! predicate_decl {
+    ($t:ident, $pred:ident, { ( $($param:ident),* $(,)? ), nl: $nl:expr, cwa: $cwa:expr $(,)? }) => {
+        $t.declare_predicate(stringify!($pred), vec![$($param),*], Some($nl), $cwa)
+    };
+    ($t:ident, $pred:ident, { ( $($param:ident),* $(,)? ), cwa: $cwa:expr, nl: $nl:expr $(,)? }) => {
+        $t.declare_predicate(stringify!($pred), vec![$($param),*], Some($nl), $cwa)
+    };
+    ($t:ident, $pred:ident, { ( $($param:ident),* $(,)? ), cwa: $cwa:expr $(,)? }) => {
+        $t.declare_predicate(stringify!($pred), vec![$($param),*], None::<String>, $cwa)
+    };
     ($t:ident, $pred:ident, { ( $($param:ident),* $(,)? ), nl: $nl:expr $(,)? }) => {
-        $t.declare_predicate(stringify!($pred), vec![$($param),*], Some($nl))
+        $t.declare_predicate(stringify!($pred), vec![$($param),*], Some($nl), false)
     };
     ($t:ident, $pred:ident, { ( $($param:ident),* $(,)? ) $(,)? }) => {
-        $t.declare_predicate(stringify!($pred), vec![$($param),*], None::<String>)
+        $t.declare_predicate(stringify!($pred), vec![$($param),*], None::<String>, false)
     };
+}
+
+/// Generates the predicate declaration + base/step Horn axioms for a single
+/// transitive_closure! entry. The closure predicate is declared with the
+/// same signature as the base (validated at runtime to be binary,
+/// same-sort) and marked `cwa: true` so `finalize_completions` produces the
+/// inductive definition.
+macro_rules! transitive_closure_decl {
+    // Entry with customization block.
+    ($t:ident, $base:ident -> $closure:ident { $($field:ident : $val:expr),* $(,)? }) => {
+        let $closure = transitive_closure_build!(
+            $t, $base, $closure,
+            { __nl: None::<&'static str>, __implicit: true },
+            { $($field : $val),* }
+        );
+    };
+    // Bare entry.
+    ($t:ident, $base:ident -> $closure:ident) => {
+        let $closure = transitive_closure_build!(
+            $t, $base, $closure,
+            { __nl: None::<&'static str>, __implicit: true },
+            {}
+        );
+    };
+}
+
+/// Iterates over the customization fields, threading them into the
+/// accumulator block; once empty, emits the declaration + axioms.
+macro_rules! transitive_closure_build {
+    // nl override.
+    ($t:ident, $base:ident, $closure:ident,
+        { __nl: $_nl:expr, __implicit: $imp:expr },
+        { nl: $nl:expr $(, $($rest:tt)*)? }
+    ) => {
+        transitive_closure_build!(
+            $t, $base, $closure,
+            { __nl: Some($nl), __implicit: $imp },
+            { $($($rest)*)? }
+        )
+    };
+    // implicit override.
+    ($t:ident, $base:ident, $closure:ident,
+        { __nl: $nl:expr, __implicit: $_imp:expr },
+        { implicit: $imp:expr $(, $($rest:tt)*)? }
+    ) => {
+        transitive_closure_build!(
+            $t, $base, $closure,
+            { __nl: $nl, __implicit: $imp },
+            { $($($rest)*)? }
+        )
+    };
+    // Customization exhausted — emit the actual declaration + axioms.
+    ($t:ident, $base:ident, $closure:ident,
+        { __nl: $nl:expr, __implicit: $imp:expr },
+        {}
+    ) => {{
+        let __sig = $t.symbol($base).signature()
+            .expect("transitive_closure: base must be a predicate");
+        assert_eq!(__sig.params().len(), 2,
+            "transitive_closure: base predicate must be binary");
+        assert_eq!(__sig.params()[0], __sig.params()[1],
+            "transitive_closure: base predicate must have both args of the same sort");
+        let __sort = __sig.params()[0];
+        let __nl_opt = $nl;
+        let __closure_name = stringify!($closure);
+        let __base_name = $t.symbol($base).name().to_string();
+
+        let __closure_id = $t.declare_predicate(
+            __closure_name,
+            vec![__sort, __sort],
+            __nl_opt,
+            true,
+        );
+
+        // Base case: base(x, y) → closure(x, y)
+        {
+            let __v0 = $crate::theories::VarId(0);
+            let __v1 = $crate::theories::VarId(1);
+            let __vars = vec![(__v0, __sort), (__v1, __sort)];
+            let __body = vec![$crate::theories::Atom::Predicate {
+                symbol: $base,
+                args: vec![$crate::theories::Term::Var(__v0), $crate::theories::Term::Var(__v1)],
+            }];
+            let __head = $crate::theories::Atom::Predicate {
+                symbol: __closure_id,
+                args: vec![$crate::theories::Term::Var(__v0), $crate::theories::Term::Var(__v1)],
+            };
+            let __kind = if $imp {
+                $crate::theories::AxiomKind::Implicit
+            } else {
+                $crate::theories::AxiomKind::Explicit
+            };
+            let __meta = $crate::theories::AxiomMeta::new(
+                format!("{}_base", __closure_name),
+                __kind,
+                format!(
+                    "If x directly {} y, then x is in the {} relation with y.",
+                    __base_name, __closure_name
+                ),
+                vec![],
+            );
+            $t.add_axiom(
+                __meta,
+                __vars,
+                $crate::theories::AxiomBody::Horn { body: __body, head: __head },
+            );
+        }
+
+        // Step case: closure(x, y) ∧ base(y, z) → closure(x, z)
+        {
+            let __v0 = $crate::theories::VarId(0);
+            let __v1 = $crate::theories::VarId(1);
+            let __v2 = $crate::theories::VarId(2);
+            let __vars = vec![(__v0, __sort), (__v1, __sort), (__v2, __sort)];
+            let __body = vec![
+                $crate::theories::Atom::Predicate {
+                    symbol: __closure_id,
+                    args: vec![$crate::theories::Term::Var(__v0), $crate::theories::Term::Var(__v1)],
+                },
+                $crate::theories::Atom::Predicate {
+                    symbol: $base,
+                    args: vec![$crate::theories::Term::Var(__v1), $crate::theories::Term::Var(__v2)],
+                },
+            ];
+            let __head = $crate::theories::Atom::Predicate {
+                symbol: __closure_id,
+                args: vec![$crate::theories::Term::Var(__v0), $crate::theories::Term::Var(__v2)],
+            };
+            let __kind = if $imp {
+                $crate::theories::AxiomKind::Implicit
+            } else {
+                $crate::theories::AxiomKind::Explicit
+            };
+            let __meta = $crate::theories::AxiomMeta::new(
+                format!("{}_step", __closure_name),
+                __kind,
+                format!(
+                    "The {} relation is transitively closed under {}.",
+                    __closure_name, __base_name
+                ),
+                vec![],
+            );
+            $t.add_axiom(
+                __meta,
+                __vars,
+                $crate::theories::AxiomBody::Horn { body: __body, head: __head },
+            );
+        }
+
+        __closure_id
+    }};
 }
 
 macro_rules! function_decl {
@@ -141,6 +301,25 @@ macro_rules! theory_stmt {
         $(
             #[allow(unused_variables)]
             let $con = $t.declare_constant(stringify!($con));
+        )*
+    };
+
+    // ------------------------------------------------------------------
+    // transitive_closure!(
+    //     base -> closure,
+    //     base -> closure { nl: "...", implicit: false },
+    //     ...
+    // )
+    //
+    // Declares each closure predicate (cwa: true, same sort as base) and
+    // emits its two Horn rules (base, step). With `cwa: true`, the
+    // `finalize_completions` pass produces the inductive definition.
+    // ------------------------------------------------------------------
+    ($t:ident, transitive_closure ! (
+        $($base:ident -> $closure:ident $({ $($field:ident : $val:expr),* $(,)? })?),* $(,)?
+    )) => {
+        $(
+            transitive_closure_decl!($t, $base -> $closure $({ $($field : $val),* })?);
         )*
     };
 

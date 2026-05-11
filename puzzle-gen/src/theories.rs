@@ -108,12 +108,20 @@ impl SymbolDecl {
 pub struct Signature {
     params: Vec<SortId>,
     ret: Option<SortId>,
+    /// Closed-world annotation for predicates. When true, the theory builder
+    /// auto-generates a Clark-completion axiom (implicit) for this predicate
+    /// during `finalize_completions`. Always false for functions.
+    closed_world: bool,
 }
 
 impl Signature {
     /// Construct a new predicate signature.
-    fn new_predicate(params: Vec<SortId>) -> Self {
-        Self { params, ret: None }
+    fn new_predicate(params: Vec<SortId>, closed_world: bool) -> Self {
+        Self {
+            params,
+            ret: None,
+            closed_world,
+        }
     }
 
     /// Construct a new function signature.
@@ -121,6 +129,7 @@ impl Signature {
         Self {
             params,
             ret: Some(ret),
+            closed_world: false,
         }
     }
 
@@ -130,6 +139,10 @@ impl Signature {
 
     pub fn ret(&self) -> Option<SortId> {
         self.ret
+    }
+
+    pub fn closed_world(&self) -> bool {
+        self.closed_world
     }
 }
 
@@ -378,6 +391,7 @@ impl Theory {
         name: impl Into<String>,
         params: Vec<SortId>,
         nl_template: Option<I>,
+        closed_world: bool,
     ) -> SymbolId
     where
         I: Into<String>,
@@ -385,7 +399,7 @@ impl Theory {
         self.symbols.insert_with_key(|id| SymbolDecl {
             id,
             name: name.into(),
-            signature: Some(Signature::new_predicate(params)),
+            signature: Some(Signature::new_predicate(params, closed_world)),
             nl_template: nl_template.map(|t| t.into()),
         })
     }
@@ -432,6 +446,177 @@ impl Theory {
             vars,
             body,
         })
+    }
+
+    /// Generate Clark-completion axioms for every predicate marked
+    /// `closed_world`. Each completion is `∀args. P(args) → ⋁_rule body_rule`,
+    /// where the bodies come from the Horn rules whose head is `P`. The
+    /// completion is added as an implicit axiom, so it can be ablated like
+    /// any other and falling back to open-world reasoning for `P`.
+    ///
+    /// Call once, after all predicates and Horn rules have been declared.
+    pub fn finalize_completions(&mut self) {
+        let cwa_predicates: Vec<(SymbolId, Vec<SortId>)> = self
+            .symbols
+            .iter()
+            .filter_map(|(id, decl)| {
+                decl.signature().and_then(|s| {
+                    if s.closed_world() && s.ret().is_none() {
+                        Some((id, s.params().to_vec()))
+                    } else {
+                        None
+                    }
+                })
+            })
+            .collect();
+
+        for (head_sym, params) in cwa_predicates {
+            let has_horn = self.axioms.iter().any(|(_, a)| matches!(
+                a.body(),
+                AxiomBody::Horn { head: Atom::Predicate { symbol, .. }, .. }
+                    if *symbol == head_sym
+            ));
+            if has_horn {
+                self.add_completion_axiom(head_sym, &params);
+            }
+            // CWA-flagged predicates with no Horn rules are handled at
+            // instance-load time by the SMT backend (which asserts negations
+            // for non-fact ground tuples). No theory-level completion needed
+            // — the ground facts ARE the predicate's definition.
+        }
+    }
+
+    fn add_completion_axiom(&mut self, head_sym: SymbolId, params: &[SortId]) {
+        let mut next_var: u32 = 0;
+        let mut fresh = || {
+            let v = VarId(next_var);
+            next_var += 1;
+            v
+        };
+
+        let arg_binders: Vec<(VarId, SortId)> = params.iter().map(|&s| (fresh(), s)).collect();
+        let arg_vars: Vec<VarId> = arg_binders.iter().map(|(v, _)| *v).collect();
+
+        // Collect Horn rules with this head; clone fields to avoid aliasing
+        // self.axioms while we mutate below.
+        let horn_rules: Vec<(Vec<(VarId, SortId)>, Vec<Atom>, Vec<Term>)> = self
+            .axioms
+            .iter()
+            .filter_map(|(_, axiom)| match axiom.body() {
+                AxiomBody::Horn { body, head: Atom::Predicate { symbol, args } }
+                    if *symbol == head_sym =>
+                {
+                    Some((axiom.vars().to_vec(), body.clone(), args.clone()))
+                }
+                _ => None,
+            })
+            .collect();
+
+        let mut disjuncts: Vec<Formula> = Vec::with_capacity(horn_rules.len());
+        for (rule_vars, body, head_args) in horn_rules {
+            // Build a rename map: rule's VarIds → fresh completion-scope VarIds.
+            // Where the head puts a rule var in position i, prefer to map that
+            // var directly to arg_vars[i]. Non-var head positions become Eq
+            // atoms in the disjunct body.
+            let mut rename: HashMap<VarId, VarId> = HashMap::new();
+            let mut extra_eqs: Vec<Atom> = Vec::new();
+            for (i, t) in head_args.iter().enumerate() {
+                let arg_v = arg_vars[i];
+                match t {
+                    Term::Var(v) => match rename.get(v) {
+                        // Repeated head var (e.g. P(x, x)) — bind to first
+                        // and force the second slot equal.
+                        Some(&prior) => {
+                            extra_eqs.push(Atom::Eq(Term::Var(prior), Term::Var(arg_v)));
+                        }
+                        None => {
+                            rename.insert(*v, arg_v);
+                        }
+                    },
+                    other => {
+                        extra_eqs.push(Atom::Eq(other.clone(), Term::Var(arg_v)));
+                    }
+                }
+            }
+
+            // Any rule var not unified with a head arg becomes a fresh
+            // existentially-quantified variable in the disjunct.
+            let mut existentials: Vec<(VarId, SortId)> = Vec::new();
+            for &(v, s) in &rule_vars {
+                if !rename.contains_key(&v) {
+                    let nv = fresh();
+                    rename.insert(v, nv);
+                    existentials.push((nv, s));
+                }
+            }
+
+            let rename_term = |t: &Term| -> Term {
+                match t {
+                    Term::Var(v) => Term::Var(*rename.get(v).unwrap_or(v)),
+                    other => other.clone(),
+                }
+            };
+            let rename_atom = |a: &Atom| -> Atom {
+                match a {
+                    Atom::Predicate { symbol, args } => Atom::Predicate {
+                        symbol: *symbol,
+                        args: args.iter().map(&rename_term).collect(),
+                    },
+                    Atom::Eq(l, r) => Atom::Eq(rename_term(l), rename_term(r)),
+                    Atom::Neq(l, r) => Atom::Neq(rename_term(l), rename_term(r)),
+                }
+            };
+
+            let mut conjuncts: Vec<Formula> = body
+                .iter()
+                .map(|a| Formula::Atom(rename_atom(a)))
+                .collect();
+            for eq in &extra_eqs {
+                conjuncts.push(Formula::Atom(rename_atom(eq)));
+            }
+
+            let conj = match conjuncts.len() {
+                1 => conjuncts.into_iter().next().unwrap(),
+                _ => Formula::And(conjuncts),
+            };
+            let disjunct = if existentials.is_empty() {
+                conj
+            } else {
+                Formula::Exists(existentials, Box::new(conj))
+            };
+            disjuncts.push(disjunct);
+        }
+
+        let head_atom = Formula::Atom(Atom::Predicate {
+            symbol: head_sym,
+            args: arg_vars.iter().copied().map(Term::Var).collect(),
+        });
+
+        // Empty disjunction means "no rule can derive P"; the completion
+        // becomes `∀args. ¬P(args)`.
+        let body = if disjuncts.is_empty() {
+            Formula::Forall(arg_binders.clone(), Box::new(Formula::Not(Box::new(head_atom))))
+        } else {
+            let rhs = if disjuncts.len() == 1 {
+                disjuncts.into_iter().next().unwrap()
+            } else {
+                Formula::Or(disjuncts)
+            };
+            Formula::Forall(
+                arg_binders.clone(),
+                Box::new(Formula::Implies(Box::new(head_atom), Box::new(rhs))),
+            )
+        };
+
+        let pred_name = self.symbols[head_sym].name().to_string();
+        let name = format!("completion_{pred_name}");
+        let nl = format!(
+            "The {pred_name} relation only holds when justified by one of \
+             the listed derivation rules."
+        );
+        let meta = AxiomMeta::new(name, AxiomKind::Implicit, nl, vec![]);
+        // `vars` left empty: the formula carries its own quantifiers.
+        self.add_axiom(meta, vec![], AxiomBody::General(body));
     }
 }
 

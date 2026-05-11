@@ -39,6 +39,25 @@ fn configure_solver<'st, B: smtlib::Backend>(
     Ok(())
 }
 
+/// Enumerate all ground tuples for a sequence of sort IDs.
+fn enumerate_ground_tuples(
+    sorts: &[SortId],
+    domain: &HashMap<SortId, Vec<ConstId>>,
+) -> Vec<Vec<ConstId>> {
+    sorts.iter().fold(vec![vec![]], |acc, &sort| {
+        let consts = domain.get(&sort).map_or(&[] as &[ConstId], Vec::as_slice);
+        acc.into_iter()
+            .flat_map(|t| {
+                consts.iter().map(move |&c| {
+                    let mut t = t.clone();
+                    t.push(c);
+                    t
+                })
+            })
+            .collect()
+    })
+}
+
 /// Backend over SMT-LIB compatible solvers.
 ///
 /// The `Storage` must outlive the backend; the caller owns it and passes a
@@ -445,9 +464,59 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             self.solver.assert(act_bool.implies(axiom_bool))?;
         }
 
-        // The SMT backend is open-world: it does not assert CWA negations.
-        // Closed-world reasoning is the responsibility of backends whose
-        // semantics demand it (e.g. a future datalog backend).
+        // 7. Pure-CWA negations for predicates flagged `closed_world` that
+        //    have no Horn rules (i.e. "ground-only" predicates like `manages`,
+        //    `fired`, `approved_expense`). For these, the only way an atom
+        //    holds is via a ground fact, so any ground tuple not asserted is
+        //    asserted false. These negations are unconditional (not gated on
+        //    any axiom activator) because they encode instance state, not
+        //    theory knowledge. Predicates with Horn rules get their CWA via
+        //    the auto-generated completion axiom instead, which is ablatable.
+        let horn_heads: HashSet<SymbolId> = theory
+            .axioms()
+            .filter_map(|(_, a)| match a.body() {
+                AxiomBody::Horn { head: Atom::Predicate { symbol, .. }, .. } => Some(*symbol),
+                _ => None,
+            })
+            .collect();
+        let ground_facts: HashSet<(SymbolId, Vec<ConstId>)> = instance
+            .facts()
+            .iter()
+            .filter_map(|atom| match atom {
+                Atom::Predicate { symbol, args } => args
+                    .iter()
+                    .map(|t| match t {
+                        Term::DomainConst(c) => Some(*c),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+                    .map(|cs| (*symbol, cs)),
+                _ => None,
+            })
+            .collect();
+        trace!("asserting ground-only CWA negations");
+        for (sym_id, decl) in theory.symbols() {
+            let Some(sig) = decl.signature() else { continue };
+            if !sig.closed_world() || sig.ret().is_some() || horn_heads.contains(&sym_id) {
+                continue;
+            }
+            for tuple in enumerate_ground_tuples(sig.params(), instance.domain()) {
+                if ground_facts.contains(&(sym_id, tuple.clone())) {
+                    continue;
+                }
+                let atom = Atom::Predicate {
+                    symbol: sym_id,
+                    args: tuple.into_iter().map(Term::DomainConst).collect(),
+                };
+                let b = self.translate_atom(&atom, &empty_var_map);
+                self.solver.assert(!b)?;
+            }
+        }
+
+        // For Horn-derived CWA predicates, the closure is enforced via the
+        // auto-generated completion axioms (added by `finalize_completions`),
+        // which flow through the activator-gating loop above and are thus
+        // ablatable like any other implicit axiom.
 
         self.active_axioms = instance.active_axioms().clone();
         self.loaded = true;

@@ -218,11 +218,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
     }
 
     /// Translate our IR `Atom` into an smtlib `Bool`.
-    fn translate_atom(
-        &self,
-        atom: &Atom,
-        var_map: &HashMap<VarId, ConstId>,
-    ) -> smtlib::Bool<'st> {
+    fn translate_atom(&self, atom: &Atom, var_map: &HashMap<VarId, ConstId>) -> smtlib::Bool<'st> {
         match atom {
             Atom::Predicate { symbol, args } => {
                 let name = self.smt_fun_names[symbol];
@@ -405,7 +401,9 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             bindings = bindings
                 .into_iter()
                 .flat_map(|b| {
-                    facts.iter().filter_map(move |fact| unify_atom(args, fact, &b))
+                    facts
+                        .iter()
+                        .filter_map(move |fact| unify_atom(args, fact, &b))
                 })
                 .collect();
 
@@ -582,7 +580,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         //    SMT-level variables left, so cvc5 has no reason to invent
         //    phantom domain elements.
         trace!("asserting domain distinctness");
-        for (_sort_id, constants) in instance.domain() {
+        for constants in instance.domain().values() {
             let const_dynamics: Vec<Dynamic<'st>> = constants
                 .iter()
                 .map(|&c| self.smt_domain_consts[&c])
@@ -636,9 +634,10 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         //    theory knowledge.
         trace!("asserting ground-only CWA negations");
         for &sym_id in &self.ground_only_preds {
-            let sig = theory.symbol(sym_id).signature().expect(
-                "ground-only predicate must have a signature (added to set with one)",
-            );
+            let sig = theory
+                .symbol(sym_id)
+                .signature()
+                .expect("ground-only predicate must have a signature (added to set with one)");
             let facts: HashSet<&Vec<ConstId>> = self
                 .ground_fact_index
                 .get(&sym_id)
@@ -721,7 +720,10 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         query: &Formula,
         expected: QueryResult,
     ) -> Result<QueryResult, Self::Error> {
-        trace!("starting directed entailment recheck (expected={:?})", expected);
+        trace!(
+            "starting directed entailment recheck (expected={:?})",
+            expected
+        );
         let q = self.ground_formula(query, &HashMap::new());
         let activator_pins = self.build_activator_pins();
 

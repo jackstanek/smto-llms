@@ -548,9 +548,9 @@ impl Theory {
             // existentially-quantified variable in the disjunct.
             let mut existentials: Vec<(VarId, SortId)> = Vec::new();
             for &(v, s) in &rule_vars {
-                if !rename.contains_key(&v) {
+                if let std::collections::hash_map::Entry::Vacant(e) = rename.entry(v) {
                     let nv = fresh();
-                    rename.insert(v, nv);
+                    e.insert(nv);
                     existentials.push((nv, s));
                 }
             }
@@ -917,10 +917,11 @@ impl StochasticAblation {
     pub fn new(theory: &Theory, rng: &mut impl Rng) -> Self {
         let (mut implicit_axioms_remaining, mut explicit_axioms): (Vec<AxiomId>, Vec<AxiomId>) =
             theory.axioms().partition_map(|(id, axiom)| {
-                axiom
-                    .implicit_by_default()
-                    .then(|| Either::Left(id))
-                    .unwrap_or(Either::Right(id))
+                if axiom.implicit_by_default() {
+                    Either::Left(id)
+                } else {
+                    Either::Right(id)
+                }
             });
         implicit_axioms_remaining.shuffle(rng);
         explicit_axioms.shuffle(rng);

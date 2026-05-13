@@ -2,7 +2,7 @@
 
 use rand::{Rng, seq::IndexedRandom};
 
-const DEPARTMENTS: &[&'static str] = &[
+const DEPARTMENTS: &[&str] = &[
     "Engineering",
     "Human Resources",
     "Finance",

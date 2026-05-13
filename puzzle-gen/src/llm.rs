@@ -34,7 +34,7 @@ pub enum LlmError {
     },
 }
 
-const RENDERER_SYSTEM_PROMPT: &'static str = "
+const RENDERER_SYSTEM_PROMPT: &str = "
     You are a prose stylist for logic puzzles. You will be given a logic
     puzzle that has already been rendered into plain English from a formal
     specification: a short preamble, a list of facts, a list of rules, and

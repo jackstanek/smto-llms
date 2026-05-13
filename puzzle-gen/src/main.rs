@@ -13,7 +13,6 @@ use smtlib::backend::cvc5_binary::Cvc5Binary;
 use crate::concrete_theories::workplace::{
     WorkplaceGenerator, WorkplaceNameInitializer, WorkplaceQueryGenerator,
 };
-use crate::llm::ValidModelName;
 use crate::rendering::Renderer;
 use crate::rendering::template::TemplateRenderer;
 use crate::solvers::{Backend, QueryResult, SmtBackend};
@@ -264,7 +263,7 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
-impl<'t> AblationStrategy for Box<dyn AblationStrategy> {
+impl AblationStrategy for Box<dyn AblationStrategy> {
     fn ablate(&mut self, inst: &mut Instance) -> ControlFlow<()> {
         (**self).ablate(inst)
     }

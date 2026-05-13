@@ -61,6 +61,7 @@ fn main() -> Result<(), BuildError> {
     let f = OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(true)
         .open(dest_path)?;
     let mut f = BufWriter::new(f);
     for (names_kind, names) in name_map {

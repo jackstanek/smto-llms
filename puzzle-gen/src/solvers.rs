@@ -1,7 +1,7 @@
 //! Backends for solvers of various logics. Currently includes just SMT solvers,
 //! but in the future could be datalog, ASP, other logics, etc.
 
-use crate::theories::{Axiom, Formula, Instance};
+use crate::theories::{Formula, Instance};
 
 pub mod smt;
 

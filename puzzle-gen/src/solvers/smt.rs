@@ -12,6 +12,7 @@ use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 use crate::solvers::{Backend, QueryResult};
 use crate::theories::{
     Atom, Axiom, AxiomBody, AxiomId, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
+    enumerate_bindings,
 };
 
 /// Set an option for the solver.
@@ -37,6 +38,59 @@ fn configure_solver<'st, B: smtlib::Backend>(
     trace!("set produce-unsat-cores true");
     solver.set_logic(smtlib::Logic::Custom("ALL".to_string()))?;
     Ok(())
+}
+
+/// Try to unify an atom's argument list with a ground fact tuple under the
+/// current partial binding. Returns the extended binding on success, `None`
+/// if any position conflicts.
+fn unify_atom(
+    args: &[Term],
+    fact: &[ConstId],
+    base: &HashMap<VarId, ConstId>,
+) -> Option<HashMap<VarId, ConstId>> {
+    if args.len() != fact.len() {
+        return None;
+    }
+    let mut out = base.clone();
+    for (arg, &c) in args.iter().zip(fact.iter()) {
+        match arg {
+            Term::Var(v) => match out.get(v).copied() {
+                Some(existing) if existing != c => return None,
+                None => {
+                    out.insert(*v, c);
+                }
+                _ => {}
+            },
+            Term::DomainConst(d) => {
+                if *d != c {
+                    return None;
+                }
+            }
+            // Function applications and theory-level constants can't be
+            // unified against a ground fact tuple here. Fall back to leaving
+            // the binding unconstrained on this atom (treat it as a non-join
+            // constraint and let the SMT body handle it).
+            Term::Const(_) | Term::App { .. } => return None,
+        }
+    }
+    Some(out)
+}
+
+/// Extract the conjuncts of a formula body, treating a single `Atom` or an
+/// `And` of formulas as a list. Used by existential specialization to find
+/// atomic constraints to join against.
+fn body_conjuncts(f: &Formula) -> Vec<&Atom> {
+    match f {
+        Formula::Atom(a) => vec![a],
+        Formula::And(fs) => fs
+            .iter()
+            .filter_map(|g| match g {
+                Formula::Atom(a) => Some(a),
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Enumerate all ground tuples for a sequence of sort IDs.
@@ -74,6 +128,18 @@ pub struct SmtBackend<'st, B: smtlib::Backend> {
     smt_domain_consts: HashMap<ConstId, Dynamic<'st>>,
     smt_fun_names: HashMap<SymbolId, &'st str>,
     smt_fun_ret_sorts: HashMap<SymbolId, smtlib::sorts::Sort<'st>>,
+    // Snapshot of the loaded instance's domain, used for grounding quantifiers
+    // in axioms and queries.
+    smt_domain: HashMap<SortId, Vec<ConstId>>,
+    // Predicates that are closed-world AND have no Horn-rule heads. Their
+    // truth set is exactly the set of ground facts, which lets us specialize
+    // bindings against them: when grounding a Horn body that references
+    // `manages(z,y)`, only enumerate (z,y) values that actually appear as
+    // ground facts — the rest are vacuous.
+    ground_only_preds: HashSet<SymbolId>,
+    // Per-predicate fact tuples, used by `specialize_bindings` to restrict
+    // enumerations against ground-only predicates.
+    ground_fact_index: HashMap<SymbolId, Vec<Vec<ConstId>>>,
     // Activator-literal name per theory axiom, in declaration order. Each
     // axiom is asserted as `(=> activator axiom)`; pinning the activator
     // turns the axiom on/off without re-asserting. A Vec rather than HashMap
@@ -105,6 +171,9 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             smt_domain_consts: HashMap::new(),
             smt_fun_names: HashMap::new(),
             smt_fun_ret_sorts: HashMap::new(),
+            smt_domain: HashMap::new(),
+            ground_only_preds: HashSet::new(),
+            ground_fact_index: HashMap::new(),
             axiom_activators: Vec::new(),
             active_axioms: HashSet::new(),
         })
@@ -125,10 +194,12 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         STerm::new(self.st, term).into()
     }
 
-    /// Translate our IR `Term` into an smtlib `Dynamic`.
-    fn translate_term(&self, term: &Term, var_map: &HashMap<VarId, Dynamic<'st>>) -> Dynamic<'st> {
+    /// Translate our IR `Term` into an smtlib `Dynamic`. `var_map` binds each
+    /// quantified variable to a domain constant; grounding has eliminated all
+    /// free variables by the time we reach here.
+    fn translate_term(&self, term: &Term, var_map: &HashMap<VarId, ConstId>) -> Dynamic<'st> {
         match term {
-            Term::Var(v) => var_map[v],
+            Term::Var(v) => self.smt_domain_consts[&var_map[v]],
             Term::Const(sym) => self.smt_consts[sym],
             Term::DomainConst(c) => self.smt_domain_consts[c],
             Term::App { symbol, args } => {
@@ -150,7 +221,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
     fn translate_atom(
         &self,
         atom: &Atom,
-        var_map: &HashMap<VarId, Dynamic<'st>>,
+        var_map: &HashMap<VarId, ConstId>,
     ) -> smtlib::Bool<'st> {
         match atom {
             Atom::Predicate { symbol, args } => {
@@ -174,146 +245,206 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         }
     }
 
-    /// Translate our IR `Formula` into an smtlib `Bool`.
-    fn translate_formula(
+    /// Ground a `Formula` against the loaded instance's finite domain into a
+    /// quantifier-free smtlib `Bool`. Universal quantifiers become explicit
+    /// conjunctions over their sort's domain; existentials become disjunctions.
+    fn ground_formula(
         &self,
         formula: &Formula,
-        var_map: &HashMap<VarId, Dynamic<'st>>,
+        var_map: &HashMap<VarId, ConstId>,
     ) -> smtlib::Bool<'st> {
         match formula {
             Formula::Atom(atom) => self.translate_atom(atom, var_map),
             Formula::And(fs) => {
-                let bools: Vec<_> = fs
-                    .iter()
-                    .map(|f| self.translate_formula(f, var_map))
-                    .collect();
+                let bools: Vec<_> = fs.iter().map(|f| self.ground_formula(f, var_map)).collect();
                 self.make_and(&bools)
             }
             Formula::Or(fs) => {
-                let bools: Vec<_> = fs
-                    .iter()
-                    .map(|f| self.translate_formula(f, var_map))
-                    .collect();
+                let bools: Vec<_> = fs.iter().map(|f| self.ground_formula(f, var_map)).collect();
                 self.make_or(&bools)
             }
-            Formula::Not(f) => !self.translate_formula(f, var_map),
+            Formula::Not(f) => !self.ground_formula(f, var_map),
             Formula::Implies(lhs, rhs) => {
-                let l = self.translate_formula(lhs, var_map);
-                let r = self.translate_formula(rhs, var_map);
+                let l = self.ground_formula(lhs, var_map);
+                let r = self.ground_formula(rhs, var_map);
                 l.implies(r)
             }
             Formula::Forall(vars, body) => {
-                let (sorted_vars, inner_map) = self.bind_vars(vars, var_map);
-                let body_bool = self.translate_formula(body, &inner_map);
-                self.wrap_forall(&sorted_vars, body_bool)
+                // Universal quantification cannot skip non-witness bindings, so
+                // it must enumerate the full Cartesian product.
+                let bools: Vec<_> = self
+                    .cartesian_bindings(vars, var_map)
+                    .into_iter()
+                    .map(|m| self.ground_formula(body, &m))
+                    .collect();
+                self.make_and(&bools)
             }
             Formula::Exists(vars, body) => {
-                let (sorted_vars, inner_map) = self.bind_vars(vars, var_map);
-                let body_bool = self.translate_formula(body, &inner_map);
-                self.wrap_exists(&sorted_vars, body_bool)
+                // Existential witnesses only matter if the body could be true;
+                // specialize the binding enumeration against any conjuncts
+                // over ground-only predicates.
+                let conjuncts = body_conjuncts(body);
+                let bools: Vec<_> = self
+                    .specialize_bindings(vars, &conjuncts, var_map.clone())
+                    .into_iter()
+                    .map(|m| self.ground_formula(body, &m))
+                    .collect();
+                self.make_or(&bools)
             }
         }
     }
 
-    /// Translate a full `Axiom` (including its implicit universal quantifier)
-    /// into an smtlib `Bool`.
-    fn translate_axiom(&self, axiom: &Axiom) -> smtlib::Bool<'st> {
-        let (sorted_vars, var_map) = self.bind_vars(axiom.vars(), &HashMap::new());
+    /// Ground an `Axiom` into a collection of quantifier-free smtlib `Bool`s,
+    /// one per binding of the axiom's universal variables over the finite
+    /// domain (specialized against ground-only body atoms where applicable).
+    /// All instances should be gated on the same activator literal by the
+    /// caller.
+    fn ground_axiom(&self, axiom: &Axiom) -> Vec<smtlib::Bool<'st>> {
+        let base: HashMap<VarId, ConstId> = HashMap::new();
+        let var_maps = match axiom.body() {
+            AxiomBody::Horn { body, .. } | AxiomBody::Integrity { body } => {
+                let constraints: Vec<&Atom> = body.iter().collect();
+                self.specialize_bindings(axiom.vars(), &constraints, base)
+            }
+            _ => self.cartesian_bindings(axiom.vars(), &base),
+        };
 
-        let body_bool = match axiom.body() {
-            AxiomBody::Horn { body, head } => {
-                let head_bool = self.translate_atom(head, &var_map);
-                if body.is_empty() {
-                    head_bool
-                } else {
+        var_maps
+            .into_iter()
+            .map(|var_map| match axiom.body() {
+                AxiomBody::Horn { body, head } => {
+                    let head_bool = self.translate_atom(head, &var_map);
+                    if body.is_empty() {
+                        head_bool
+                    } else {
+                        let body_bools: Vec<_> = body
+                            .iter()
+                            .map(|a| self.translate_atom(a, &var_map))
+                            .collect();
+                        self.make_and(&body_bools).implies(head_bool)
+                    }
+                }
+                AxiomBody::Integrity { body } => {
                     let body_bools: Vec<_> = body
                         .iter()
                         .map(|a| self.translate_atom(a, &var_map))
                         .collect();
-                    self.make_and(&body_bools).implies(head_bool)
+                    !self.make_and(&body_bools)
                 }
-            }
-            AxiomBody::Integrity { body } => {
-                let body_bools: Vec<_> = body
-                    .iter()
-                    .map(|a| self.translate_atom(a, &var_map))
-                    .collect();
-                !self.make_and(&body_bools)
-            }
-            AxiomBody::FunctionalFact {
-                symbol,
-                args,
-                value,
-            } => {
-                let name = self.smt_fun_names[symbol];
-                let arg_terms: Vec<&'st ast::Term<'st>> = args
-                    .iter()
-                    .map(|a| self.translate_term(a, &var_map).term())
-                    .collect();
-                let app = Dynamic::from_term_sort(
-                    STerm::new(self.st, self.smt_app(name, &arg_terms)),
-                    self.smt_fun_ret_sorts[symbol],
-                );
-                let val = self.translate_term(value, &var_map);
-                app._eq(val)
-            }
-            AxiomBody::General(formula) => self.translate_formula(formula, &var_map),
-        };
-
-        if sorted_vars.is_empty() {
-            body_bool
-        } else {
-            self.wrap_forall(&sorted_vars, body_bool)
-        }
+                AxiomBody::FunctionalFact {
+                    symbol,
+                    args,
+                    value,
+                } => {
+                    let name = self.smt_fun_names[symbol];
+                    let arg_terms: Vec<&'st ast::Term<'st>> = args
+                        .iter()
+                        .map(|a| self.translate_term(a, &var_map).term())
+                        .collect();
+                    let app = Dynamic::from_term_sort(
+                        STerm::new(self.st, self.smt_app(name, &arg_terms)),
+                        self.smt_fun_ret_sorts[symbol],
+                    );
+                    let val = self.translate_term(value, &var_map);
+                    app._eq(val)
+                }
+                AxiomBody::General(formula) => self.ground_formula(formula, &var_map),
+            })
+            .collect()
     }
 
-    // -- Quantifier / connective helpers ------------------------------------
-
-    /// Create smtlib sorted-variable bindings and extend the var_map.
-    fn bind_vars(
+    /// Full Cartesian-product enumeration of `vars` over the finite domain,
+    /// extending each base binding. Used when we have no body constraints to
+    /// specialize on (universal quantifiers, functional facts).
+    fn cartesian_bindings(
         &self,
         vars: &[(VarId, SortId)],
-        parent_map: &HashMap<VarId, Dynamic<'st>>,
-    ) -> (Vec<ast::SortedVar<'st>>, HashMap<VarId, Dynamic<'st>>) {
-        let mut map = parent_map.clone();
-        let mut sorted = Vec::with_capacity(vars.len());
+        base: &HashMap<VarId, ConstId>,
+    ) -> Vec<HashMap<VarId, ConstId>> {
+        enumerate_bindings(vars, &self.smt_domain)
+            .into_iter()
+            .map(|binding| {
+                let mut m = base.clone();
+                m.extend(binding);
+                m
+            })
+            .collect()
+    }
 
-        for &(var_id, sort_id) in vars {
-            let var_name = self.st.alloc_str(&format!("_v{}", var_id.0));
-            let sort = self.smt_sorts[&sort_id];
+    /// Enumerate bindings of `vars` (extending `base`) that have a chance of
+    /// satisfying every `constraint` atom which is over a *ground-only*
+    /// predicate. Constraints over other predicates are ignored — those atoms
+    /// remain in the SMT body and the solver evaluates them.
+    ///
+    /// This collapses the Cartesian product against the actual ground fact
+    /// sets of closed-world ground-only predicates (e.g. `manages`, `fired`).
+    /// For a rule like `manages_plus_step` with body `mp(x,z) ∧ manages(z,y)`,
+    /// this turns an O(|domain|³) enumeration into O(#manages-facts · |domain|).
+    fn specialize_bindings(
+        &self,
+        vars: &[(VarId, SortId)],
+        constraints: &[&Atom],
+        base: HashMap<VarId, ConstId>,
+    ) -> Vec<HashMap<VarId, ConstId>> {
+        let mut bound: HashSet<VarId> = base.keys().copied().collect();
+        let mut bindings: Vec<HashMap<VarId, ConstId>> = vec![base];
 
-            sorted.push(ast::SortedVar(lexicon::Symbol(var_name), sort.ast()));
+        for atom in constraints {
+            let Atom::Predicate { symbol, args } = atom else {
+                continue;
+            };
+            if !self.ground_only_preds.contains(symbol) {
+                continue;
+            }
+            let Some(facts) = self.ground_fact_index.get(symbol) else {
+                // Closed-world ground-only predicate with no facts: the atom
+                // is always false, so no binding can satisfy the body.
+                return Vec::new();
+            };
 
-            // Build a term that references this quantified variable.
-            let qi = ast::QualIdentifier::Sorted(
-                ast::Identifier::Simple(lexicon::Symbol(var_name)),
-                sort.ast(),
-            );
-            let dynamic =
-                Dynamic::from_term_sort(STerm::new(self.st, ast::Term::Identifier(qi)), sort);
-            map.insert(var_id, dynamic);
+            bindings = bindings
+                .into_iter()
+                .flat_map(|b| {
+                    facts.iter().filter_map(move |fact| unify_atom(args, fact, &b))
+                })
+                .collect();
+
+            for arg in args.iter() {
+                if let Term::Var(v) = arg {
+                    bound.insert(*v);
+                }
+            }
+
+            if bindings.is_empty() {
+                return bindings;
+            }
         }
 
-        (sorted, map)
+        let remaining: Vec<(VarId, SortId)> = vars
+            .iter()
+            .copied()
+            .filter(|(v, _)| !bound.contains(v))
+            .collect();
+
+        if remaining.is_empty() {
+            bindings
+        } else {
+            bindings
+                .into_iter()
+                .flat_map(|b| {
+                    enumerate_bindings(&remaining, &self.smt_domain)
+                        .into_iter()
+                        .map(move |ext| {
+                            let mut nb = b.clone();
+                            nb.extend(ext);
+                            nb
+                        })
+                })
+                .collect()
+        }
     }
 
-    fn wrap_forall(
-        &self,
-        vars: &[ast::SortedVar<'st>],
-        body: smtlib::Bool<'st>,
-    ) -> smtlib::Bool<'st> {
-        let vars_slice = self.st.alloc_slice(vars);
-        self.to_bool(ast::Term::Forall(vars_slice, body.term()))
-    }
-
-    fn wrap_exists(
-        &self,
-        vars: &[ast::SortedVar<'st>],
-        body: smtlib::Bool<'st>,
-    ) -> smtlib::Bool<'st> {
-        let vars_slice = self.st.alloc_slice(vars);
-        self.to_bool(ast::Term::Exists(vars_slice, body.term()))
-    }
+    // -- Connective helpers -------------------------------------------------
 
     fn make_and(&self, bools: &[smtlib::Bool<'st>]) -> smtlib::Bool<'st> {
         match bools.len() {
@@ -400,12 +531,58 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             }
         }
 
+        // Snapshot the domain so grounding helpers can enumerate over it.
+        self.smt_domain = instance.domain().clone();
+
+        // Identify "ground-only" predicates and index their facts. A predicate
+        // is ground-only iff it is closed-world and has no Horn rule producing
+        // it — its truth set is then exactly the set of ground facts in the
+        // instance. We use this both to specialize binding enumeration in
+        // `ground_axiom` and to emit the CWA negations below.
+        let horn_heads: HashSet<SymbolId> = theory
+            .axioms()
+            .filter_map(|(_, a)| match a.body() {
+                AxiomBody::Horn {
+                    head: Atom::Predicate { symbol, .. },
+                    ..
+                } => Some(*symbol),
+                _ => None,
+            })
+            .collect();
+        for (sym_id, decl) in theory.symbols() {
+            let Some(sig) = decl.signature() else {
+                continue;
+            };
+            if sig.closed_world() && sig.ret().is_none() && !horn_heads.contains(&sym_id) {
+                self.ground_only_preds.insert(sym_id);
+            }
+        }
+        for fact in instance.facts() {
+            if let Atom::Predicate { symbol, args } = fact
+                && self.ground_only_preds.contains(symbol)
+                && let Some(tuple) = args
+                    .iter()
+                    .map(|t| match t {
+                        Term::DomainConst(c) => Some(*c),
+                        _ => None,
+                    })
+                    .collect::<Option<Vec<_>>>()
+            {
+                self.ground_fact_index
+                    .entry(*symbol)
+                    .or_default()
+                    .push(tuple);
+            }
+        }
+
         let empty_var_map = HashMap::new();
 
-        // 4. Assert per-sort distinctness and coverage constraints.
-        trace!("asserting domain constraints");
-        for (sort_id, constants) in instance.domain() {
-            let sort = self.smt_sorts[sort_id];
+        // 4. Assert per-sort distinctness. Coverage is no longer needed: with
+        //    every axiom grounded over the finite domain there are no free
+        //    SMT-level variables left, so cvc5 has no reason to invent
+        //    phantom domain elements.
+        trace!("asserting domain distinctness");
+        for (_sort_id, constants) in instance.domain() {
             let const_dynamics: Vec<Dynamic<'st>> = constants
                 .iter()
                 .map(|&c| self.smt_domain_consts[&c])
@@ -417,24 +594,6 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
                 let distinct = self.smt_app("distinct", &terms);
                 self.solver.assert(self.to_bool(distinct))?;
             }
-
-            if !const_dynamics.is_empty() {
-                let var_name = self.st.alloc_str("_cov");
-                let var_binder = ast::SortedVar(lexicon::Symbol(var_name), sort.ast());
-                let var_qi = ast::QualIdentifier::Sorted(
-                    ast::Identifier::Simple(lexicon::Symbol(var_name)),
-                    sort.ast(),
-                );
-                let var_dyn = Dynamic::from_term_sort(
-                    STerm::new(self.st, ast::Term::Identifier(var_qi)),
-                    sort,
-                );
-                let disjuncts: Vec<smtlib::Bool<'st>> =
-                    const_dynamics.iter().map(|c| var_dyn._eq(*c)).collect();
-                let body = self.make_or(&disjuncts);
-                let coverage = self.wrap_forall(&[var_binder], body);
-                self.solver.assert(coverage)?;
-            }
         }
 
         // 5. Assert ground facts.
@@ -444,11 +603,13 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             self.solver.assert(b)?;
         }
 
-        // 6. Declare an activator boolean per theory axiom and assert
-        //    `(=> activator axiom)`. Toggling the activator via
-        //    check-sat-assuming turns the axiom on/off without re-asserting.
-        trace!("declaring axiom activators");
+        // 6. Declare an activator boolean per theory axiom and assert one
+        //    `(=> activator ground_instance)` per binding of the axiom's
+        //    quantified variables over the finite domain. Toggling the
+        //    activator turns the whole axiom on/off without re-asserting.
+        trace!("grounding and asserting axioms");
         let bool_sort = smtlib::sorts::Sort::Static(smtlib::Bool::AST_SORT);
+        let mut total_ground_clauses: usize = 0;
         for (axiom_id, axiom) in theory.axioms() {
             let act_name = self
                 .st
@@ -460,53 +621,32 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             let act_qi =
                 ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(act_name)));
             let act_bool = self.to_bool(ast::Term::Identifier(act_qi));
-            let axiom_bool = self.translate_axiom(axiom);
-            self.solver.assert(act_bool.implies(axiom_bool))?;
-        }
 
-        // 7. Pure-CWA negations for predicates flagged `closed_world` that
-        //    have no Horn rules (i.e. "ground-only" predicates like `manages`,
-        //    `fired`, `approved_expense`). For these, the only way an atom
-        //    holds is via a ground fact, so any ground tuple not asserted is
-        //    asserted false. These negations are unconditional (not gated on
-        //    any axiom activator) because they encode instance state, not
-        //    theory knowledge. Predicates with Horn rules get their CWA via
-        //    the auto-generated completion axiom instead, which is ablatable.
-        let horn_heads: HashSet<SymbolId> = theory
-            .axioms()
-            .filter_map(|(_, a)| match a.body() {
-                AxiomBody::Horn {
-                    head: Atom::Predicate { symbol, .. },
-                    ..
-                } => Some(*symbol),
-                _ => None,
-            })
-            .collect();
-        let ground_facts: HashSet<(SymbolId, Vec<ConstId>)> = instance
-            .facts()
-            .iter()
-            .filter_map(|atom| match atom {
-                Atom::Predicate { symbol, args } => args
-                    .iter()
-                    .map(|t| match t {
-                        Term::DomainConst(c) => Some(*c),
-                        _ => None,
-                    })
-                    .collect::<Option<Vec<_>>>()
-                    .map(|cs| (*symbol, cs)),
-                _ => None,
-            })
-            .collect();
-        trace!("asserting ground-only CWA negations");
-        for (sym_id, decl) in theory.symbols() {
-            let Some(sig) = decl.signature() else {
-                continue;
-            };
-            if !sig.closed_world() || sig.ret().is_some() || horn_heads.contains(&sym_id) {
-                continue;
+            let instances = self.ground_axiom(axiom);
+            total_ground_clauses += instances.len();
+            for ground in instances {
+                self.solver.assert(act_bool.implies(ground))?;
             }
+        }
+        trace!("asserted {} ground axiom clauses", total_ground_clauses);
+
+        // 7. Pure-CWA negations for ground-only predicates: any tuple not
+        //    asserted as a fact is asserted false. Unconditional (not gated
+        //    on any axiom activator) because they encode instance state, not
+        //    theory knowledge.
+        trace!("asserting ground-only CWA negations");
+        for &sym_id in &self.ground_only_preds {
+            let sig = theory.symbol(sym_id).signature().expect(
+                "ground-only predicate must have a signature (added to set with one)",
+            );
+            let facts: HashSet<&Vec<ConstId>> = self
+                .ground_fact_index
+                .get(&sym_id)
+                .into_iter()
+                .flatten()
+                .collect();
             for tuple in enumerate_ground_tuples(sig.params(), instance.domain()) {
-                if ground_facts.contains(&(sym_id, tuple.clone())) {
+                if facts.contains(&tuple) {
                     continue;
                 }
                 let atom = Atom::Predicate {
@@ -546,7 +686,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
 
     fn check_entailment(&mut self, query: &Formula) -> Result<QueryResult, Self::Error> {
         trace!("starting entailment check");
-        let q = self.translate_formula(query, &HashMap::new());
+        let q = self.ground_formula(query, &HashMap::new());
         let activator_pins = self.build_activator_pins();
 
         // T union F union {not q} unsat  =>  q is entailed.
@@ -582,7 +722,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         expected: QueryResult,
     ) -> Result<QueryResult, Self::Error> {
         trace!("starting directed entailment recheck (expected={:?})", expected);
-        let q = self.translate_formula(query, &HashMap::new());
+        let q = self.ground_formula(query, &HashMap::new());
         let activator_pins = self.build_activator_pins();
 
         // Under monotone ablation the verdict can only stay at `expected` or

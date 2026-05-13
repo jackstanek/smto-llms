@@ -13,6 +13,7 @@ use smtlib::backend::cvc5_binary::Cvc5Binary;
 use crate::concrete_theories::workplace::{
     WorkplaceGenerator, WorkplaceNameInitializer, WorkplaceQueryGenerator,
 };
+use crate::llm::ValidModelName;
 use crate::rendering::Renderer;
 use crate::rendering::template::TemplateRenderer;
 use crate::solvers::{Backend, QueryResult, SmtBackend};
@@ -241,6 +242,7 @@ async fn main() -> anyhow::Result<()> {
             info!("rendering flavour text via {:?} ({})", provider, model);
             let renderer = provider
                 .build_renderer(model, args.ollama_url.as_deref())
+                .await
                 .context("constructing LLM renderer")?;
             renderer
                 .render(&nl_story)

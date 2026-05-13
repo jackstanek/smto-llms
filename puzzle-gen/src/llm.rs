@@ -6,19 +6,35 @@
 //! `LlmRenderer` trait object so the choice of backend (OpenAI,
 //! Anthropic, local Ollama, …) stays a CLI concern.
 
-use anyhow::{Context, anyhow};
 use async_trait::async_trait;
 use clap::ValueEnum;
 use rig::{
     agent::Agent,
-    client::{Nothing, ProviderClient},
-    completion::{CompletionModel, Prompt},
+    client::{ModelListingClient, Nothing, ProviderClient},
+    completion::{CompletionModel, Prompt, PromptError},
+    model::ModelListingError,
     prelude::CompletionClient,
-    providers::{anthropic, gemini, ollama, openai},
+    providers::{gemini, ollama},
 };
+use thiserror::Error;
+
+/// Main error type for LLM-related errors.
+#[derive(Debug, Error)]
+pub enum LlmError {
+    #[error("prompt error: {0}")]
+    PromptError(#[from] PromptError),
+    #[error("model listing error: {0}")]
+    ModelListingError(#[from] ModelListingError),
+    #[error("HTTP error: {0}")]
+    HttpError(#[from] rig::http_client::Error),
+    #[error("no such model (available models: {joined})", joined = avail_models.join(", "))]
+    NoSuchModel {
+        /// Available models from the selected provider
+        avail_models: Vec<String>,
+    },
+}
 
 const RENDERER_SYSTEM_PROMPT: &'static str = "
-
     You are a prose stylist for logic puzzles. You will be given a logic
     puzzle that has already been rendered into plain English from a formal
     specification: a short preamble, a list of facts, a list of rules, and
@@ -43,12 +59,29 @@ const RENDERER_SYSTEM_PROMPT: &'static str = "
       follow-up questions. Do not answer the puzzle yourself.
 ";
 
-/// Provider-agnostic rendering interface. Each backend (`RendererAgent<M>`
-/// over some concrete rig `CompletionModel`) implements this, and `main`
-/// holds a `Box<dyn LlmRenderer>` chosen from the `--llm-provider` flag.
-#[async_trait]
-pub trait LlmRenderer: Send + Sync {
-    async fn render(&self, input: &str) -> anyhow::Result<String>;
+/// Valid model name for some provider.
+pub struct ValidModelName {
+    name: String,
+}
+
+impl ValidModelName {
+    /// Validate a model name against some provider, returning a
+    /// `ValidModelName` if it is available, or a list of available models if it
+    /// is not.
+    pub async fn validate<C>(client: &C, name: impl Into<String>) -> Result<Self, LlmError>
+    where
+        C: ModelListingClient,
+    {
+        let models = client.list_models().await?;
+        let name = name.into();
+        // Check if the model is available before constructing
+        if models.iter().any(|m| m.id.as_str() == name.as_str()) {
+            Ok(Self { name })
+        } else {
+            let avail_models = models.into_iter().map(|m| m.id).collect();
+            Err(LlmError::NoSuchModel { avail_models })
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -65,12 +98,12 @@ where
 {
     /// Construct a new renderer agent which constructs logic puzzles from the
     /// given instances.
-    pub fn new<C>(client: C, model_name: impl Into<String>) -> Self
+    pub fn new<C>(client: C, model_name: ValidModelName) -> Self
     where
         C: CompletionClient<CompletionModel = M>,
     {
         let agent = client
-            .agent(model_name)
+            .agent(model_name.name)
             .preamble(RENDERER_SYSTEM_PROMPT)
             .temperature(0.0)
             .build();
@@ -79,15 +112,17 @@ where
 }
 
 #[async_trait]
+pub trait LlmRenderer {
+    async fn render(&self, input: &str) -> Result<String, LlmError>;
+}
+
+#[async_trait]
 impl<M> LlmRenderer for RendererAgent<M>
 where
     M: CompletionModel + Send + Sync + 'static,
 {
-    async fn render(&self, input: &str) -> anyhow::Result<String> {
-        self.agent
-            .prompt(input)
-            .await
-            .context("couldn't access LLM agent")
+    async fn render(&self, input: &str) -> Result<String, LlmError> {
+        Ok(self.agent.prompt(input).await?)
     }
 }
 
@@ -95,10 +130,6 @@ where
 /// `build_renderer`; the rest of the program only sees `dyn LlmRenderer`.
 #[derive(Copy, Clone, Debug, ValueEnum)]
 pub enum Provider {
-    /// OpenAI (Responses API). Reads `OPENAI_API_KEY`.
-    Openai,
-    /// Anthropic. Reads `ANTHROPIC_API_KEY`.
-    Anthropic,
     /// Gemini. Reads `GEMINI_API_KEY`.
     Gemini,
     /// Ollama, for local models. Defaults to `http://localhost:11434`;
@@ -109,32 +140,25 @@ pub enum Provider {
 impl Provider {
     /// Build a renderer for this provider. Returns a trait object so
     /// callers don't have to know which `CompletionModel` was selected.
-    pub fn build_renderer(
+    pub async fn build_renderer(
         self,
         model_name: impl Into<String>,
         ollama_url: Option<&str>,
-    ) -> anyhow::Result<Box<dyn LlmRenderer>> {
-        let model_name = model_name.into();
+    ) -> Result<Box<dyn LlmRenderer>, LlmError> {
         Ok(match self {
-            Provider::Openai => {
-                Box::new(RendererAgent::new(openai::Client::from_env(), model_name))
-            }
-            Provider::Anthropic => Box::new(RendererAgent::new(
-                anthropic::Client::from_env(),
-                model_name,
-            )),
             Provider::Gemini => {
-                Box::new(RendererAgent::new(gemini::Client::from_env(), model_name))
+                let client = gemini::Client::from_env();
+                let model_name = ValidModelName::validate(&client, model_name).await?;
+                Box::new(RendererAgent::new(client, model_name)) as Box<dyn LlmRenderer>
             }
             Provider::Ollama => {
                 let mut builder = ollama::Client::builder().api_key(Nothing);
                 if let Some(url) = ollama_url {
                     builder = builder.base_url(url);
                 }
-                let client = builder
-                    .build()
-                    .map_err(|e| anyhow!("failed to build Ollama client: {e}"))?;
-                Box::new(RendererAgent::new(client, model_name))
+                let client = builder.build().map_err(LlmError::from)?;
+                let model_name = ValidModelName::validate(&client, model_name).await?;
+                Box::new(RendererAgent::new(client, model_name)) as Box<dyn LlmRenderer>
             }
         })
     }

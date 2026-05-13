@@ -307,22 +307,21 @@ fn build() -> Theory {
         integrity! {
             name:     "no_self_manage",
             implicit: true,
-            nl:       "No one manages themselves",
+            nl:       "No one manages themselves.",
             forall (p: employee) {
                 body: manages(p, p);
             }
         };
 
         // ------------------------------------------------------------------
-        // I4. The manages relation is anti-symmetric.
-        //     If p manages q then q does not manage p.
+        // I4. There are no cycles in the manamgement chain
         // ------------------------------------------------------------------
         integrity! {
             name:     "manages_antisymmetry",
             implicit: true,
-            nl:       "The management relation is anti-symmetric",
+            nl:       "There are no cycles in the management chain.",
             forall (p: employee, q: employee) {
-                body: manages(p, q), manages(q, p);
+                body: manages_plus(p, q), manages_plus(q, p);
             }
         };
     };

@@ -176,13 +176,9 @@ macro_rules! transitive_closure_build {
             } else {
                 $crate::theories::AxiomKind::Explicit
             };
-            let __meta = $crate::theories::AxiomMeta::new(
+            let __meta = $crate::theories::AxiomMeta::new_raw(
                 format!("{}_base", __closure_name),
                 __kind,
-                format!(
-                    "If x directly {} y, then x is in the {} relation with y.",
-                    __base_name, __closure_name
-                ),
                 vec![],
             );
             $t.add_axiom(
@@ -217,13 +213,9 @@ macro_rules! transitive_closure_build {
             } else {
                 $crate::theories::AxiomKind::Explicit
             };
-            let __meta = $crate::theories::AxiomMeta::new(
+            let __meta = $crate::theories::AxiomMeta::new_raw(
                 format!("{}_step", __closure_name),
                 __kind,
-                format!(
-                    "The {} relation is transitively closed under {}.",
-                    __closure_name, __base_name
-                ),
                 vec![],
             );
             $t.add_axiom(
@@ -365,7 +357,7 @@ macro_rules! theory_stmt {
             } else {
                 $crate::theories::AxiomKind::Explicit
             };
-            let __meta = $crate::theories::AxiomMeta::new($name, __implicit, $nl, vec![]);
+            let __meta = $crate::theories::AxiomMeta::new_nl($name, __implicit, $nl, vec![]);
             $t.add_axiom(
                 __meta,
                 __vars,
@@ -411,7 +403,7 @@ macro_rules! theory_stmt {
             } else {
                 $crate::theories::AxiomKind::Explicit
             };
-            let __meta = $crate::theories::AxiomMeta::new($name, __implicit, $nl, vec![]);
+            let __meta = $crate::theories::AxiomMeta::new_nl($name, __implicit, $nl, vec![]);
             $t.add_axiom(
                 __meta,
                 __vars,

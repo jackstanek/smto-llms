@@ -227,7 +227,7 @@ impl Axiom {
         &self.body
     }
 
-    pub fn natural_language(&self) -> &str {
+    pub fn natural_language(&self) -> Option<&str> {
         self.meta.natural_language()
     }
 }
@@ -264,12 +264,23 @@ impl Display for AxiomKind {
 pub struct AxiomMeta {
     name: String,
     kind: AxiomKind,
-    natural_language: String,
+    natural_language: Option<String>,
     depends_on: Vec<AxiomId>,
 }
 
 impl AxiomMeta {
-    pub fn new(
+    /// Create a new "raw" axiom (without natural language description)
+    pub fn new_raw(name: impl Into<String>, kind: AxiomKind, depends_on: Vec<AxiomId>) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            natural_language: None,
+            depends_on,
+        }
+    }
+
+    /// Create a new axiom with a natural language description
+    pub fn new_nl(
         name: impl Into<String>,
         kind: AxiomKind,
         natural_language: impl Into<String>,
@@ -278,7 +289,7 @@ impl AxiomMeta {
         Self {
             name: name.into(),
             kind,
-            natural_language: natural_language.into(),
+            natural_language: Some(natural_language.into()),
             depends_on,
         }
     }
@@ -287,8 +298,8 @@ impl AxiomMeta {
         &self.name
     }
 
-    pub fn natural_language(&self) -> &str {
-        &self.natural_language
+    pub fn natural_language(&self) -> Option<&str> {
+        self.natural_language.as_deref()
     }
 
     pub fn implicit_by_default(&self) -> bool {
@@ -605,11 +616,11 @@ impl Theory {
 
         let pred_name = self.symbols[head_sym].name().to_string();
         let name = format!("completion_{pred_name}");
-        let nl = format!(
-            "The {pred_name} relation only holds when justified by one of \
-             the listed derivation rules."
-        );
-        let meta = AxiomMeta::new(name, AxiomKind::Implicit, nl, vec![]);
+        // Note that here we *don't* explicitly list a natural language rule for
+        // the completion. First, it is awkward to state, and second, since it's
+        // implicit, we are unconditionally "ablating" it by not including it in
+        // the natural language rule listing.
+        let meta = AxiomMeta::new_raw(name, AxiomKind::Implicit, vec![]);
         // `vars` left empty: the formula carries its own quantifiers.
         self.add_axiom(meta, vec![], AxiomBody::General(body));
     }

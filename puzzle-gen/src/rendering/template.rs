@@ -62,7 +62,8 @@ where
         let rules = instance
             .active_axioms()
             .iter()
-            .map(|id| theory.axiom(*id).natural_language().to_string())
+            .filter_map(|id| theory.axiom(*id).natural_language())
+            .map(String::from)
             .collect();
 
         let query = render_formula(theory, &names, query).context("rendering query")?;

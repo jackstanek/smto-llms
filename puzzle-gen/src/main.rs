@@ -13,7 +13,6 @@ use smtlib::backend::cvc5_binary::Cvc5Binary;
 use crate::concrete_theories::workplace::{
     WorkplaceGenerator, WorkplaceNameInitializer, WorkplaceQueryGenerator,
 };
-use crate::pprint::{PrettyFormula, PrettyInstance};
 use crate::rendering::Renderer;
 use crate::rendering::template::TemplateRenderer;
 use crate::solvers::{Backend, QueryResult, SmtBackend};
@@ -26,7 +25,6 @@ use crate::theories::{
 mod macros;
 mod concrete_theories;
 mod llm;
-mod pprint;
 mod rendering;
 mod solvers;
 mod theories;
@@ -74,6 +72,21 @@ struct Args {
     /// Diagnostic logs always go to stderr regardless of this setting.
     #[arg(long, short, default_value = "-")]
     output: String,
+
+    /// LLM provider to use for flavour-text rendering. When unset, the
+    /// template renderer's output is written directly.
+    #[arg(long, value_enum)]
+    llm_provider: Option<llm::Provider>,
+
+    /// Model identifier passed to the selected provider (e.g.
+    /// `gpt-4o-mini`, `claude-haiku-4-5`, `llama3.2`).
+    #[arg(long, requires = "llm_provider")]
+    llm_model: Option<String>,
+
+    /// Base URL for the Ollama server. Defaults to rig's built-in
+    /// `http://localhost:11434`.
+    #[arg(long)]
+    ollama_url: Option<String>,
 }
 
 fn open_output(spec: &str) -> anyhow::Result<Box<dyn Write>> {
@@ -132,13 +145,7 @@ async fn main() -> anyhow::Result<()> {
     // 3. Materialise the model as an Instance with all axioms active.
     let mut instance = Instance::from_ground_model(model);
     trace!("initialized instance");
-    info!(
-        "query: {}",
-        PrettyFormula {
-            formula: &query,
-            instance: &instance
-        }
-    );
+    debug!("query: {:?}", query);
 
     // 4. Set up the SMT backend.
     debug!("using cvc5 binary at `{}`", args.cvc5);
@@ -220,26 +227,33 @@ async fn main() -> anyhow::Result<()> {
         puzzle_status,
     );
 
-    let pretty = format!(
-        "{}",
-        PrettyInstance {
-            instance: &instance
-        }
-    );
-    for line in pretty.lines() {
-        info!("{line}");
-    }
+    let name_initializer =
+        WorkplaceNameInitializer::new(rand::rngs::StdRng::seed_from_u64(args.seed.wrapping_add(3)));
+    let template_renderer = TemplateRenderer::new(name_initializer);
+    let nl_story = template_renderer.render(&query, &instance).await?;
 
-    let name_initializer = WorkplaceNameInitializer::new(rand::rngs::StdRng::seed_from_u64(
-        args.seed.wrapping_add(3),
-    ));
-    let renderer = TemplateRenderer::new(name_initializer);
-    let nl_story = renderer.render(&query, &instance).await?;
+    let puzzle_text = match args.llm_provider {
+        Some(provider) => {
+            let model = args
+                .llm_model
+                .as_deref()
+                .ok_or_else(|| anyhow!("--llm-model is required when --llm-provider is set"))?;
+            info!("rendering flavour text via {:?} ({})", provider, model);
+            let renderer = provider
+                .build_renderer(model, args.ollama_url.as_deref())
+                .context("constructing LLM renderer")?;
+            renderer
+                .render(&nl_story)
+                .await
+                .context("LLM rendering failed")?
+        }
+        None => nl_story,
+    };
 
     let mut sink = open_output(&args.output)?;
-    sink.write_all(nl_story.as_bytes())
+    sink.write_all(puzzle_text.as_bytes())
         .context("writing puzzle to output")?;
-    if !nl_story.ends_with('\n') {
+    if !puzzle_text.ends_with('\n') {
         sink.write_all(b"\n")
             .context("writing puzzle trailing newline")?;
     }

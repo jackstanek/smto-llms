@@ -54,15 +54,6 @@ impl ConstDecl {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct VarId(pub u32);
 
-/// Domain of a sort
-#[derive(Debug, Clone)]
-pub enum SortDomain {
-    /// Uninterpreted domain, instantiated at compile time
-    Uninterpreted,
-    /// Explicitly enumerated sort with finite domain
-    Enumerated(Vec<SymbolId>),
-}
-
 /// Sort declaration associating a sort with its domain.
 #[derive(Debug, Clone)]
 pub struct SortDecl {
@@ -471,11 +462,13 @@ impl Theory {
             .collect();
 
         for (head_sym, params) in cwa_predicates {
-            let has_horn = self.axioms.iter().any(|(_, a)| matches!(
-                a.body(),
-                AxiomBody::Horn { head: Atom::Predicate { symbol, .. }, .. }
-                    if *symbol == head_sym
-            ));
+            let has_horn = self.axioms.iter().any(|(_, a)| {
+                matches!(
+                    a.body(),
+                    AxiomBody::Horn { head: Atom::Predicate { symbol, .. }, .. }
+                        if *symbol == head_sym
+                )
+            });
             if has_horn {
                 self.add_completion_axiom(head_sym, &params);
             }
@@ -503,9 +496,10 @@ impl Theory {
             .axioms
             .iter()
             .filter_map(|(_, axiom)| match axiom.body() {
-                AxiomBody::Horn { body, head: Atom::Predicate { symbol, args } }
-                    if *symbol == head_sym =>
-                {
+                AxiomBody::Horn {
+                    body,
+                    head: Atom::Predicate { symbol, args },
+                } if *symbol == head_sym => {
                     Some((axiom.vars().to_vec(), body.clone(), args.clone()))
                 }
                 _ => None,
@@ -567,10 +561,8 @@ impl Theory {
                 }
             };
 
-            let mut conjuncts: Vec<Formula> = body
-                .iter()
-                .map(|a| Formula::Atom(rename_atom(a)))
-                .collect();
+            let mut conjuncts: Vec<Formula> =
+                body.iter().map(|a| Formula::Atom(rename_atom(a))).collect();
             for eq in &extra_eqs {
                 conjuncts.push(Formula::Atom(rename_atom(eq)));
             }
@@ -595,7 +587,10 @@ impl Theory {
         // Empty disjunction means "no rule can derive P"; the completion
         // becomes `∀args. ¬P(args)`.
         let body = if disjuncts.is_empty() {
-            Formula::Forall(arg_binders.clone(), Box::new(Formula::Not(Box::new(head_atom))))
+            Formula::Forall(
+                arg_binders.clone(),
+                Box::new(Formula::Not(Box::new(head_atom))),
+            )
         } else {
             let rhs = if disjuncts.len() == 1 {
                 disjuncts.into_iter().next().unwrap()

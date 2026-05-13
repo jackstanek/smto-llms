@@ -372,9 +372,8 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
                 let fun = smtlib::funs::Fun::new(self.st, const_name, vec![], sort);
                 self.solver.declare_fun(&fun)?;
                 let name = self.st.alloc_str(const_name);
-                let qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(
-                    lexicon::Symbol(name),
-                ));
+                let qi =
+                    ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
                 let dynamic =
                     Dynamic::from_term_sort(STerm::new(self.st, ast::Term::Identifier(qi)), sort);
                 self.smt_domain_consts.insert(const_id, dynamic);
@@ -451,14 +450,15 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         trace!("declaring axiom activators");
         let bool_sort = smtlib::sorts::Sort::Static(smtlib::Bool::AST_SORT);
         for (axiom_id, axiom) in theory.axioms() {
-            let act_name = self.st.alloc_str(&format!("_act_a{}", self.axiom_activators.len()));
+            let act_name = self
+                .st
+                .alloc_str(&format!("_act_a{}", self.axiom_activators.len()));
             let fun = smtlib::funs::Fun::new(self.st, act_name, vec![], bool_sort);
             self.solver.declare_fun(&fun)?;
             self.axiom_activators.push((axiom_id, act_name));
 
-            let act_qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(
-                lexicon::Symbol(act_name),
-            ));
+            let act_qi =
+                ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(act_name)));
             let act_bool = self.to_bool(ast::Term::Identifier(act_qi));
             let axiom_bool = self.translate_axiom(axiom);
             self.solver.assert(act_bool.implies(axiom_bool))?;
@@ -475,7 +475,10 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         let horn_heads: HashSet<SymbolId> = theory
             .axioms()
             .filter_map(|(_, a)| match a.body() {
-                AxiomBody::Horn { head: Atom::Predicate { symbol, .. }, .. } => Some(*symbol),
+                AxiomBody::Horn {
+                    head: Atom::Predicate { symbol, .. },
+                    ..
+                } => Some(*symbol),
                 _ => None,
             })
             .collect();
@@ -496,7 +499,9 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             .collect();
         trace!("asserting ground-only CWA negations");
         for (sym_id, decl) in theory.symbols() {
-            let Some(sig) = decl.signature() else { continue };
+            let Some(sig) = decl.signature() else {
+                continue;
+            };
             if !sig.closed_world() || sig.ret().is_some() || horn_heads.contains(&sym_id) {
                 continue;
             }
@@ -539,11 +544,6 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         Ok(())
     }
 
-    fn assert_axiom(&mut self, axiom: &Axiom) -> Result<(), Self::Error> {
-        let b = self.translate_axiom(axiom);
-        self.solver.assert(b)
-    }
-
     fn check_entailment(&mut self, query: &Formula) -> Result<QueryResult, Self::Error> {
         trace!("starting entailment check");
         let q = self.translate_formula(query, &HashMap::new());
@@ -557,7 +557,8 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         let mut activator_pins: Vec<smtlib::Bool<'st>> =
             Vec::with_capacity(self.axiom_activators.len());
         for &(axiom_id, name) in &self.axiom_activators {
-            let qi = ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
+            let qi =
+                ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
             let act_bool = self.to_bool(ast::Term::Identifier(qi));
             if self.active_axioms.contains(&axiom_id) {
                 activator_pins.push(act_bool);

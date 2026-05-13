@@ -547,25 +547,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
     fn check_entailment(&mut self, query: &Formula) -> Result<QueryResult, Self::Error> {
         trace!("starting entailment check");
         let q = self.translate_formula(query, &HashMap::new());
-
-        // Pin each activator literal positively or negatively for this check.
-        // (`check-sat-assuming` would be the natural fit, but smtlib 0.3.0's
-        // `PropLiteral` Display impl is buggy and prints both variants
-        // identically, so we use plain bool asserts inside a push/pop scope
-        // instead. Still much cheaper than re-translating the axioms each
-        // step.)
-        let mut activator_pins: Vec<smtlib::Bool<'st>> =
-            Vec::with_capacity(self.axiom_activators.len());
-        for &(axiom_id, name) in &self.axiom_activators {
-            let qi =
-                ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
-            let act_bool = self.to_bool(ast::Term::Identifier(qi));
-            if self.active_axioms.contains(&axiom_id) {
-                activator_pins.push(act_bool);
-            } else {
-                activator_pins.push(!act_bool);
-            }
-        }
+        let activator_pins = self.build_activator_pins();
 
         // T union F union {not q} unsat  =>  q is entailed.
         let entailed = self.solver.scope(|solver| {
@@ -592,5 +574,66 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         }
 
         Ok(QueryResult::Undetermined)
+    }
+
+    fn recheck_entailment(
+        &mut self,
+        query: &Formula,
+        expected: QueryResult,
+    ) -> Result<QueryResult, Self::Error> {
+        trace!("starting directed entailment recheck (expected={:?})", expected);
+        let q = self.translate_formula(query, &HashMap::new());
+        let activator_pins = self.build_activator_pins();
+
+        // Under monotone ablation the verdict can only stay at `expected` or
+        // degrade to Undetermined. So we only need to check the one direction
+        // that could flip: assert the *probe* (negation of the expected-witness
+        // formula) and see if it's satisfiable.
+        //
+        //   expected = Entailed  ⇒ probe = ¬q;  sat ⇒ no longer entailed
+        //   expected = Refuted   ⇒ probe =  q;  sat ⇒ no longer refuted
+        let probe = match expected {
+            QueryResult::Entailed => !q,
+            QueryResult::Refuted => q,
+            QueryResult::Undetermined => {
+                panic!("recheck_entailment called with Undetermined expected")
+            }
+        };
+
+        let res = self.solver.scope(|solver| {
+            for pin in &activator_pins {
+                solver.assert(*pin)?;
+            }
+            solver.assert(probe)?;
+            solver.check_sat()
+        })?;
+        Ok(match res {
+            smtlib::SatResult::Unsat => expected,
+            _ => QueryResult::Undetermined,
+        })
+    }
+}
+
+impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
+    fn build_activator_pins(&self) -> Vec<smtlib::Bool<'st>> {
+        // Pin each activator literal positively or negatively for the current
+        // active-axiom set.
+        // (`check-sat-assuming` would be the natural fit, but smtlib 0.3.0's
+        // `PropLiteral` Display impl is buggy and prints both variants
+        // identically, so callers use plain bool asserts inside a push/pop
+        // scope instead. Still much cheaper than re-translating the axioms
+        // each step.)
+        let mut pins = Vec::with_capacity(self.axiom_activators.len());
+        for &(axiom_id, name) in &self.axiom_activators {
+            let qi =
+                ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
+            let act_bool = self.to_bool(ast::Term::Identifier(qi));
+            if self.active_axioms.contains(&axiom_id) {
+                pins.push(act_bool);
+            } else {
+                pins.push(!act_bool);
+            }
+        }
+        pins
     }
 }

@@ -36,4 +36,15 @@ pub trait Backend {
     /// Check whether a formula is entailed, refuted, or undetermined under the
     /// currently loaded instance and active axiom set.
     fn check_entailment(&mut self, query: &Formula) -> Result<QueryResult, Self::Error>;
+
+    /// Like `check_entailment`, but assumes `expected` is the currently
+    /// known status under a *superset* of the active axioms. Under monotone
+    /// ablation the verdict can only stay at `expected` or degrade to
+    /// `Undetermined` — never flip to the opposite verdict — so a single
+    /// `check-sat` suffices. Panics if `expected` is `Undetermined`.
+    fn recheck_entailment(
+        &mut self,
+        query: &Formula,
+        expected: QueryResult,
+    ) -> Result<QueryResult, Self::Error>;
 }

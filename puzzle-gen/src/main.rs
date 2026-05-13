@@ -192,7 +192,7 @@ async fn main() -> anyhow::Result<()> {
             .set_active_axioms(&instance)
             .with_context(|| format!("syncing active axioms after ablation step {step}"))?;
         let status = backend
-            .check_entailment(&query)
+            .recheck_entailment(&query, initial)
             .with_context(|| format!("entailment check at step {step}"))?;
 
         if status != initial {

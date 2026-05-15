@@ -1,7 +1,7 @@
 //! Backends for solvers of various logics. Currently includes just SMT solvers,
 //! but in the future could be datalog, ASP, other logics, etc.
 
-use crate::theories::{Formula, Instance};
+use crate::theories::{AxiomId, Formula, Instance};
 
 pub mod smt;
 
@@ -47,4 +47,7 @@ pub trait Backend {
         query: &Formula,
         expected: QueryResult,
     ) -> Result<QueryResult, Self::Error>;
+
+    /// Get an unsat core
+    fn get_unsat_core(&mut self) -> Result<Vec<AxiomId>, Self::Error>;
 }

@@ -4,16 +4,27 @@ use std::collections::{HashMap, HashSet};
 
 use log::trace;
 use smtlib::lowlevel::{
-    ast::{self},
+    ast::{self, GeneralResponse, SpecificSuccessResponse},
     lexicon::{self},
 };
 use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
+use thiserror::Error;
 
 use crate::solvers::{Backend, QueryResult};
 use crate::theories::{
     Atom, Axiom, AxiomBody, AxiomId, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
     enumerate_bindings,
 };
+
+#[derive(Debug, Error)]
+pub enum SmtBackendError {
+    #[error("unsupported feature: {0}")]
+    Unsupported(String),
+    #[error("general solver error: {0}")]
+    General(String),
+    #[error("solver error: {0}")]
+    Solver(#[from] smtlib::Error),
+}
 
 /// Set an option for the solver.
 fn set_option<'st, B: smtlib::Backend>(
@@ -177,6 +188,20 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             axiom_activators: Vec::new(),
             active_axioms: HashSet::new(),
         })
+    }
+
+    /// Run a command and translate any errors.
+    fn run_command(
+        &mut self,
+        cmd: ast::Command<'st>,
+    ) -> Result<Option<SpecificSuccessResponse<'st>>, SmtBackendError> {
+        let resp = self.solver.run_command(cmd)?;
+        match resp {
+            GeneralResponse::Success => Ok(None),
+            GeneralResponse::SpecificSuccessResponse(resp) => Ok(Some(resp)),
+            GeneralResponse::Unsupported => Err(SmtBackendError::Unsupported(cmd.to_string())),
+            GeneralResponse::Error(e) => Err(SmtBackendError::General(e.to_string())),
+        }
     }
 
     /// Build an SMT-LIB function/predicate application term.
@@ -468,7 +493,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
 }
 
 impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
-    type Error = smtlib::Error;
+    type Error = SmtBackendError;
 
     fn load_instance(&mut self, instance: &Instance<'_>) -> Result<(), Self::Error> {
         assert!(
@@ -668,7 +693,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
     }
 
     fn set_active_axioms(&mut self, instance: &Instance<'_>) -> Result<(), Self::Error> {
-        assert!(self.loaded, "set_active_axioms called before load_instance");
+        debug_assert!(self.loaded, "set_active_axioms called before load_instance");
         let new_active = instance.active_axioms();
         debug_assert!(
             new_active.is_subset(&self.active_axioms),
@@ -753,6 +778,29 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             smtlib::SatResult::Unsat => expected,
             _ => QueryResult::Undetermined,
         })
+    }
+
+    /// Get an unsat core from the current instance.
+    fn get_unsat_core(&mut self) -> Result<Vec<AxiomId>, Self::Error> {
+        debug_assert!(self.loaded, "get_unsat_core called before load_instance");
+        let cmd = ast::Command::GetUnsatCore;
+        let resp = self.run_command(cmd)?;
+        if let Some(SpecificSuccessResponse::GetUnsatCoreResponse(resp)) = resp {
+            let syms: Vec<AxiomId> = resp
+                .0
+                .into_iter()
+                .map(|s| {
+                    self.axiom_activators
+                        .iter()
+                        .find(|(_, a)| *a == s.0)
+                        .map(|(i, _)| *i)
+                        .expect("symbol from unsat core not found in axiom activators")
+                })
+                .collect();
+            return Ok(syms);
+        } else {
+            unreachable!("wrong response from get-unsat-core");
+        }
     }
 }
 

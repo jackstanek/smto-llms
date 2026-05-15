@@ -2,10 +2,11 @@
 
 use std::collections::{HashMap, HashSet};
 
+use bimap::BiMap;
 use log::trace;
 use smtlib::lowlevel::{
-    ast::{self, GeneralResponse, SpecificSuccessResponse},
-    lexicon::{self},
+    ast::{self, AttributeValue, GeneralResponse, GetUnsatCoreResponse, SpecificSuccessResponse},
+    lexicon::{self, Keyword},
 };
 use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 use thiserror::Error;
@@ -156,7 +157,7 @@ pub struct SmtBackend<'st, B: smtlib::Backend> {
     // turns the axiom on/off without re-asserting. A Vec rather than HashMap
     // because cvc5 is sensitive to assertion order — non-deterministic
     // iteration introduces large run-to-run variance in solve time.
-    axiom_activators: Vec<(AxiomId, &'st str)>,
+    axiom_activators: BiMap<AxiomId, &'st str>,
     // Currently-active axioms (mirrors the latest Instance's set).
     active_axioms: HashSet<AxiomId>,
 }
@@ -185,7 +186,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             smt_domain: HashMap::new(),
             ground_only_preds: HashSet::new(),
             ground_fact_index: HashMap::new(),
-            axiom_activators: Vec::new(),
+            axiom_activators: BiMap::new(),
             active_axioms: HashSet::new(),
         })
     }
@@ -202,6 +203,21 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             GeneralResponse::Unsupported => Err(SmtBackendError::Unsupported(cmd.to_string())),
             GeneralResponse::Error(e) => Err(SmtBackendError::General(e.to_string())),
         }
+    }
+
+    /// Assert a boolean condition with a given name.
+    fn assert_named(
+        &mut self,
+        cond: smtlib::Bool<'st>,
+        name: &'st str,
+    ) -> Result<(), SmtBackendError> {
+        let anno = self.st.alloc_slice(&[ast::Attribute::WithValue(
+            Keyword(":named"),
+            AttributeValue::Symbol(lexicon::Symbol(name)),
+        )]);
+        let assertion = self.st.alloc(ast::Term::Annotation(cond.term(), anno));
+        let cmd = ast::Command::Assert(assertion);
+        self.run_command(cmd).map(|_| ())
     }
 
     /// Build an SMT-LIB function/predicate application term.
@@ -492,6 +508,25 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
     }
 }
 
+/// Low-level helper to get an unsat core.
+fn get_unsat_core<'st, B>(
+    solver: &mut smtlib::Solver<'st, B>,
+) -> Result<GetUnsatCoreResponse<'st>, smtlib::Error>
+where
+    B: smtlib::Backend,
+{
+    let cmd = ast::Command::GetUnsatCore;
+    let resp = solver.run_command(cmd)?;
+    if let GeneralResponse::SpecificSuccessResponse(
+        SpecificSuccessResponse::GetUnsatCoreResponse(resp),
+    ) = resp
+    {
+        Ok(resp)
+    } else {
+        unreachable!("wrong response from get-unsat-core");
+    }
+}
+
 impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
     type Error = SmtBackendError;
 
@@ -639,7 +674,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
                 .alloc_str(&format!("_act_a{}", self.axiom_activators.len()));
             let fun = smtlib::funs::Fun::new(self.st, act_name, vec![], bool_sort);
             self.solver.declare_fun(&fun)?;
-            self.axiom_activators.push((axiom_id, act_name));
+            self.axiom_activators.insert(axiom_id, act_name);
 
             let act_qi =
                 ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(act_name)));
@@ -647,8 +682,10 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
 
             let instances = self.ground_axiom(axiom);
             total_ground_clauses += instances.len();
-            for ground in instances {
-                self.solver.assert(act_bool.implies(ground))?;
+            for (i, ground) in instances.into_iter().enumerate() {
+                let gac_name = self.st.alloc_str(&format!("{}_{i}", act_name));
+                trace!("asserting ground axiom clause {}", gac_name);
+                self.assert_named(act_bool.implies(ground), &gac_name)?;
             }
         }
         trace!("asserted {} ground axiom clauses", total_ground_clauses);
@@ -714,27 +751,35 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         let activator_pins = self.build_activator_pins();
 
         // T union F union {not q} unsat  =>  q is entailed.
-        let entailed = self.solver.scope(|solver| {
+        let (entailed, core) = self.solver.scope(|solver| {
             for pin in &activator_pins {
                 solver.assert(*pin)?;
             }
             solver.assert(!q)?;
-            solver.check_sat()
+            let sat = solver.check_sat()?;
+            let core = get_unsat_core(solver)?;
+            Ok((sat, core))
         })?;
         if entailed == smtlib::SatResult::Unsat {
-            return Ok(QueryResult::Entailed);
+            return Ok(QueryResult::Entailed {
+                core: self.process_unsat_core(core)?,
+            });
         }
 
         // T union F union {q} unsat  =>  not-q is entailed (q is refuted).
-        let refuted = self.solver.scope(|solver| {
+        let (refuted, core) = self.solver.scope(|solver| {
             for pin in &activator_pins {
                 solver.assert(*pin)?;
             }
             solver.assert(q)?;
-            solver.check_sat()
+            let sat = solver.check_sat()?;
+            let core = get_unsat_core(solver)?;
+            Ok((sat, core))
         })?;
         if refuted == smtlib::SatResult::Unsat {
-            return Ok(QueryResult::Refuted);
+            return Ok(QueryResult::Refuted {
+                core: self.process_unsat_core(core)?,
+            });
         }
 
         Ok(QueryResult::Undetermined)
@@ -760,8 +805,8 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         //   expected = Entailed  ⇒ probe = ¬q;  sat ⇒ no longer entailed
         //   expected = Refuted   ⇒ probe =  q;  sat ⇒ no longer refuted
         let probe = match expected {
-            QueryResult::Entailed => !q,
-            QueryResult::Refuted => q,
+            QueryResult::Entailed { .. } => !q,
+            QueryResult::Refuted { .. } => q,
             QueryResult::Undetermined => {
                 panic!("recheck_entailment called with Undetermined expected")
             }
@@ -779,29 +824,6 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             _ => QueryResult::Undetermined,
         })
     }
-
-    /// Get an unsat core from the current instance.
-    fn get_unsat_core(&mut self) -> Result<Vec<AxiomId>, Self::Error> {
-        debug_assert!(self.loaded, "get_unsat_core called before load_instance");
-        let cmd = ast::Command::GetUnsatCore;
-        let resp = self.run_command(cmd)?;
-        if let Some(SpecificSuccessResponse::GetUnsatCoreResponse(resp)) = resp {
-            let syms: Vec<AxiomId> = resp
-                .0
-                .into_iter()
-                .map(|s| {
-                    self.axiom_activators
-                        .iter()
-                        .find(|(_, a)| *a == s.0)
-                        .map(|(i, _)| *i)
-                        .expect("symbol from unsat core not found in axiom activators")
-                })
-                .collect();
-            return Ok(syms);
-        } else {
-            unreachable!("wrong response from get-unsat-core");
-        }
-    }
 }
 
 impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
@@ -814,7 +836,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         // scope instead. Still much cheaper than re-translating the axioms
         // each step.)
         let mut pins = Vec::with_capacity(self.axiom_activators.len());
-        for &(axiom_id, name) in &self.axiom_activators {
+        for (axiom_id, name) in self.axiom_activators.iter() {
             let qi =
                 ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
             let act_bool = self.to_bool(ast::Term::Identifier(qi));
@@ -825,5 +847,19 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             }
         }
         pins
+    }
+
+    /// Convert a get-unsat-core response into a list of axiom IDs in the core.
+    fn process_unsat_core(
+        &self,
+        core: GetUnsatCoreResponse<'_>,
+    ) -> Result<Vec<AxiomId>, SmtBackendError> {
+        let mut result = Vec::with_capacity(core.0.len());
+        for sym in core.0 {
+            if let Some(axiom_id) = self.axiom_activators.get_by_right(sym.0) {
+                result.push(*axiom_id);
+            }
+        }
+        Ok(result)
     }
 }

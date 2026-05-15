@@ -8,12 +8,12 @@ pub mod smt;
 pub use smt::SmtBackend;
 
 /// Result of an entailment check.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryResult {
     /// T union F entails q.
-    Entailed,
+    Entailed { core: Vec<AxiomId> },
     /// T union F entails not-q.
-    Refuted,
+    Refuted { core: Vec<AxiomId> },
     /// Neither entailed nor refuted.
     Undetermined,
 }
@@ -47,7 +47,4 @@ pub trait Backend {
         query: &Formula,
         expected: QueryResult,
     ) -> Result<QueryResult, Self::Error>;
-
-    /// Get an unsat core
-    fn get_unsat_core(&mut self) -> Result<Vec<AxiomId>, Self::Error>;
 }

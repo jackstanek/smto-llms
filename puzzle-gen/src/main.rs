@@ -162,9 +162,9 @@ async fn main() -> anyhow::Result<()> {
     let initial = backend
         .check_entailment(&query)
         .context("initial entailment check")?;
-    info!("initial entailment status: {:?}", initial);
-    match initial {
-        QueryResult::Entailed | QueryResult::Refuted => {}
+    info!("initial entailment status: {:?}", &initial);
+    match &initial {
+        QueryResult::Entailed { .. } | QueryResult::Refuted { .. } => {}
         QueryResult::Undetermined => {
             return Err(anyhow!(
                 "ground theory does not uniquely decide the sampled query — \
@@ -191,7 +191,7 @@ async fn main() -> anyhow::Result<()> {
             .set_active_axioms(&instance)
             .with_context(|| format!("syncing active axioms after ablation step {step}"))?;
         let status = backend
-            .recheck_entailment(&query, initial)
+            .recheck_entailment(&query, initial.clone())
             .with_context(|| format!("entailment check at step {step}"))?;
 
         if status != initial {

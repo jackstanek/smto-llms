@@ -18,4 +18,3 @@ tokio = { version = "1.52.1", features = ["macros", "rt-multi-thread"] }
 askama = "0.16.0"
 thiserror = "2.0.18"
 async-trait = "0.1.89"
-bimap = "0.6.3"

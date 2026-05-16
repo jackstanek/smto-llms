@@ -23,6 +23,7 @@ use crate::theories::{
 
 #[macro_use]
 mod macros;
+mod bimulmap;
 mod concrete_theories;
 mod llm;
 mod rendering;

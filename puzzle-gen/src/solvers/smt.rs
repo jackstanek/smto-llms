@@ -2,7 +2,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use bimap::BiMap;
 use log::trace;
 use smtlib::lowlevel::{
     ast::{self, AttributeValue, GeneralResponse, GetUnsatCoreResponse, SpecificSuccessResponse},
@@ -11,6 +10,7 @@ use smtlib::lowlevel::{
 use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 use thiserror::Error;
 
+use crate::bimulmap::BiMulMap;
 use crate::solvers::{Backend, QueryResult};
 use crate::theories::{
     Atom, Axiom, AxiomBody, AxiomId, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
@@ -152,12 +152,15 @@ pub struct SmtBackend<'st, B: smtlib::Backend> {
     // Per-predicate fact tuples, used by `specialize_bindings` to restrict
     // enumerations against ground-only predicates.
     ground_fact_index: HashMap<SymbolId, Vec<Vec<ConstId>>>,
-    // Activator-literal name per theory axiom, in declaration order. Each
-    // axiom is asserted as `(=> activator axiom)`; pinning the activator
-    // turns the axiom on/off without re-asserting. A Vec rather than HashMap
-    // because cvc5 is sensitive to assertion order — non-deterministic
-    // iteration introduces large run-to-run variance in solve time.
-    axiom_activators: BiMap<AxiomId, &'st str>,
+    // Per-axiom activator literal name (`_act_aN`), in declaration order.
+    // Each axiom is asserted as `(=> activator axiom)`; pinning the activator
+    // turns the axiom on/off without re-asserting. A Vec preserves order
+    // because cvc5 is sensitive to assertion order.
+    activator_names: Vec<(AxiomId, &'st str)>,
+    // AxiomId ↔ ground-clause names. Each axiom grounds to many `:named`
+    // clauses (`_act_aN_i`); the reverse map lets `process_unsat_core` resolve
+    // each clause in the unsat core back to its owning axiom.
+    axiom_activators: BiMulMap<AxiomId, &'st str>,
     // Currently-active axioms (mirrors the latest Instance's set).
     active_axioms: HashSet<AxiomId>,
 }
@@ -186,7 +189,8 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             smt_domain: HashMap::new(),
             ground_only_preds: HashSet::new(),
             ground_fact_index: HashMap::new(),
-            axiom_activators: BiMap::new(),
+            activator_names: Vec::new(),
+            axiom_activators: BiMulMap::new(),
             active_axioms: HashSet::new(),
         })
     }
@@ -671,10 +675,10 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         for (axiom_id, axiom) in theory.axioms() {
             let act_name = self
                 .st
-                .alloc_str(&format!("_act_a{}", self.axiom_activators.len()));
+                .alloc_str(&format!("_act_a{}", self.activator_names.len()));
             let fun = smtlib::funs::Fun::new(self.st, act_name, vec![], bool_sort);
             self.solver.declare_fun(&fun)?;
-            self.axiom_activators.insert(axiom_id, act_name);
+            self.activator_names.push((axiom_id, act_name));
 
             let act_qi =
                 ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(act_name)));
@@ -686,6 +690,7 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
                 let gac_name = self.st.alloc_str(&format!("{}_{i}", act_name));
                 trace!("asserting ground axiom clause {}", gac_name);
                 self.assert_named(act_bool.implies(ground), &gac_name)?;
+                self.axiom_activators.insert(axiom_id, gac_name);
             }
         }
         trace!("asserted {} ground axiom clauses", total_ground_clauses);
@@ -757,12 +762,16 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             }
             solver.assert(!q)?;
             let sat = solver.check_sat()?;
-            let core = get_unsat_core(solver)?;
+            let core = if sat == smtlib::SatResult::Unsat {
+                Some(get_unsat_core(solver)?)
+            } else {
+                None
+            };
             Ok((sat, core))
         })?;
         if entailed == smtlib::SatResult::Unsat {
             return Ok(QueryResult::Entailed {
-                core: self.process_unsat_core(core)?,
+                core: self.process_unsat_core(core.expect("unsat path must have core"))?,
             });
         }
 
@@ -773,12 +782,16 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             }
             solver.assert(q)?;
             let sat = solver.check_sat()?;
-            let core = get_unsat_core(solver)?;
+            let core = if sat == smtlib::SatResult::Unsat {
+                Some(get_unsat_core(solver)?)
+            } else {
+                None
+            };
             Ok((sat, core))
         })?;
         if refuted == smtlib::SatResult::Unsat {
             return Ok(QueryResult::Refuted {
-                core: self.process_unsat_core(core)?,
+                core: self.process_unsat_core(core.expect("unsat path must have core"))?,
             });
         }
 
@@ -835,8 +848,8 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         // identically, so callers use plain bool asserts inside a push/pop
         // scope instead. Still much cheaper than re-translating the axioms
         // each step.)
-        let mut pins = Vec::with_capacity(self.axiom_activators.len());
-        for (axiom_id, name) in self.axiom_activators.iter() {
+        let mut pins = Vec::with_capacity(self.activator_names.len());
+        for &(axiom_id, name) in &self.activator_names {
             let qi =
                 ast::QualIdentifier::Identifier(ast::Identifier::Simple(lexicon::Symbol(name)));
             let act_bool = self.to_bool(ast::Term::Identifier(qi));
@@ -854,12 +867,182 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         &self,
         core: GetUnsatCoreResponse<'_>,
     ) -> Result<Vec<AxiomId>, SmtBackendError> {
+        let mut seen: HashSet<AxiomId> = HashSet::new();
         let mut result = Vec::with_capacity(core.0.len());
         for sym in core.0 {
-            if let Some(axiom_id) = self.axiom_activators.get_by_right(sym.0) {
-                result.push(*axiom_id);
+            if let Some(&axiom_id) = self.axiom_activators.get_key(&sym.0)
+                && seen.insert(axiom_id)
+            {
+                result.push(axiom_id);
             }
         }
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::theories::{GroundModel, Theory};
+    use smtlib::Storage;
+    use smtlib::backend::cvc5_binary::Cvc5Binary;
+
+    fn build_test_theory() -> Theory {
+        theory! {
+            sorts!(employee);
+            predicates!(
+                manages { (employee, employee) },
+                can_fire { (employee, employee) },
+                unrelated { (employee, employee) },
+            );
+            horn! {
+                name:     "manages_can_fire",
+                implicit: false,
+                nl:       "managers can fire",
+                forall (x: employee, y: employee) {
+                    body: manages(x, y);
+                    head: can_fire(x, y);
+                }
+            };
+            horn! {
+                name:     "unrelated_rule",
+                implicit: false,
+                nl:       "unrelated derivation",
+                forall (x: employee, y: employee) {
+                    body: manages(x, y);
+                    head: unrelated(x, y);
+                }
+            };
+            integrity! {
+                name:     "no_self_fire",
+                implicit: true,
+                nl:       "no one fires themselves",
+                forall (x: employee) {
+                    body: can_fire(x, x);
+                }
+            };
+        }
+    }
+
+    fn axiom_id_by_name(theory: &Theory, name: &str) -> AxiomId {
+        theory
+            .axioms()
+            .find(|(_, a)| a.name() == name)
+            .map(|(id, _)| id)
+            .unwrap_or_else(|| panic!("axiom {name} not found"))
+    }
+
+    fn make_backend(st: &Storage) -> SmtBackend<'_, Cvc5Binary> {
+        let cvc5 = Cvc5Binary::new("cvc5").expect("spawn cvc5");
+        SmtBackend::new(st, cvc5).expect("construct backend")
+    }
+
+    #[test]
+    fn entailed_core_contains_loadbearing_axiom() {
+        let theory = build_test_theory();
+        let employee = theory.find_sort("employee");
+        let manages = theory.find_symbol("manages");
+        let can_fire = theory.find_symbol("can_fire");
+
+        let mut model = GroundModel::new(&theory);
+        let alice = model.add_constant("alice", employee);
+        let bob = model.add_constant("bob", employee);
+        model.add_predicate_fact(manages, vec![alice, bob]);
+        let instance = Instance::from_ground_model(model);
+
+        let query = Formula::Atom(Atom::Predicate {
+            symbol: can_fire,
+            args: vec![Term::DomainConst(alice), Term::DomainConst(bob)],
+        });
+
+        let st = Storage::new();
+        let mut backend = make_backend(&st);
+        backend.load_instance(&instance).unwrap();
+        let result = backend.check_entailment(&query).unwrap();
+
+        let mcf = axiom_id_by_name(&theory, "manages_can_fire");
+        let unrel = axiom_id_by_name(&theory, "unrelated_rule");
+        match result {
+            QueryResult::Entailed { core } => {
+                assert!(
+                    core.contains(&mcf),
+                    "core missing manages_can_fire: {core:?}"
+                );
+                assert!(
+                    !core.contains(&unrel),
+                    "core unexpectedly contains unrelated_rule: {core:?}"
+                );
+            }
+            other => panic!("expected Entailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn refuted_core_contains_integrity_axiom() {
+        let theory = build_test_theory();
+        let employee = theory.find_sort("employee");
+        let manages = theory.find_symbol("manages");
+        let can_fire = theory.find_symbol("can_fire");
+
+        let mut model = GroundModel::new(&theory);
+        let alice = model.add_constant("alice", employee);
+        let bob = model.add_constant("bob", employee);
+        // A fact so the domain isn't empty; irrelevant to the self-fire query.
+        model.add_predicate_fact(manages, vec![alice, bob]);
+        let instance = Instance::from_ground_model(model);
+
+        let query = Formula::Atom(Atom::Predicate {
+            symbol: can_fire,
+            args: vec![Term::DomainConst(alice), Term::DomainConst(alice)],
+        });
+
+        let st = Storage::new();
+        let mut backend = make_backend(&st);
+        backend.load_instance(&instance).unwrap();
+        let result = backend.check_entailment(&query).unwrap();
+
+        let nsf = axiom_id_by_name(&theory, "no_self_fire");
+        match result {
+            QueryResult::Refuted { core } => {
+                assert!(core.contains(&nsf), "core missing no_self_fire: {core:?}");
+            }
+            other => panic!("expected Refuted, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deactivating_core_axioms_degrades_verdict() {
+        let theory = build_test_theory();
+        let employee = theory.find_sort("employee");
+        let manages = theory.find_symbol("manages");
+        let can_fire = theory.find_symbol("can_fire");
+
+        let mut model = GroundModel::new(&theory);
+        let alice = model.add_constant("alice", employee);
+        let bob = model.add_constant("bob", employee);
+        model.add_predicate_fact(manages, vec![alice, bob]);
+        let mut instance = Instance::from_ground_model(model);
+
+        let query = Formula::Atom(Atom::Predicate {
+            symbol: can_fire,
+            args: vec![Term::DomainConst(alice), Term::DomainConst(bob)],
+        });
+
+        let st = Storage::new();
+        let mut backend = make_backend(&st);
+        backend.load_instance(&instance).unwrap();
+        let initial = backend.check_entailment(&query).unwrap();
+        let core = match &initial {
+            QueryResult::Entailed { core } => core.clone(),
+            other => panic!("expected Entailed initially, got {other:?}"),
+        };
+        assert!(!core.is_empty(), "entailed core must be non-empty");
+
+        for id in &core {
+            instance.deactivate_axiom(*id);
+        }
+        backend.set_active_axioms(&instance).unwrap();
+        let after = backend.recheck_entailment(&query, initial.clone()).unwrap();
+        assert_eq!(after, QueryResult::Undetermined);
     }
 }

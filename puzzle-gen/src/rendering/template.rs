@@ -47,14 +47,19 @@ where
         &self,
         query: &Formula,
         instance: &Instance<'_>,
+        fact_filter: Option<&[usize]>,
     ) -> Result<String, Self::Error> {
         let mut names = NameMap::new();
         self.initializer.init_map(instance, &mut names);
         let theory = instance.theory();
 
-        let facts = instance
-            .facts()
-            .iter()
+        let all_facts = instance.facts();
+        let filtered: Vec<&Atom> = match fact_filter {
+            Some(idxs) => idxs.iter().map(|&i| &all_facts[i]).collect(),
+            None => all_facts.iter().collect(),
+        };
+        let facts = filtered
+            .into_iter()
             .map(|atom| render_atom(theory, &names, atom))
             .collect::<Result<Vec<_>, _>>()
             .context("rendering facts")?;

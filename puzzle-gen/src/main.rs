@@ -164,15 +164,20 @@ async fn main() -> anyhow::Result<()> {
         .check_entailment(&query)
         .context("initial entailment check")?;
     info!("initial entailment status: {:?}", &initial);
-    match &initial {
-        QueryResult::Entailed { .. } | QueryResult::Refuted { .. } => {}
+    let initial_core = match &initial {
+        QueryResult::Entailed { core } | QueryResult::Refuted { core } => core.clone(),
         QueryResult::Undetermined => {
             return Err(anyhow!(
                 "ground theory does not uniquely decide the sampled query — \
                  cannot generate a puzzle from this model/query pair"
             ));
         }
-    }
+    };
+    info!(
+        "initial core: {} axioms, {} facts load-bearing",
+        initial_core.axioms.len(),
+        initial_core.facts.len(),
+    );
 
     // 6. Ablation loop. Each step deactivates more axioms; we stop the moment
     //    the query becomes underdetermined (or wrongly decided) and keep that
@@ -231,7 +236,14 @@ async fn main() -> anyhow::Result<()> {
     let name_initializer =
         WorkplaceNameInitializer::new(rand::rngs::StdRng::seed_from_u64(args.seed.wrapping_add(3)));
     let template_renderer = TemplateRenderer::new(name_initializer);
-    let nl_story = template_renderer.render(&query, &instance).await?;
+    // Restrict the rendered facts to the load-bearing subset identified by
+    // the unsat core under the full theory — the minimum the oracle-equipped
+    // solver needs to decide the query.
+    let mut fact_indices = initial_core.facts.clone();
+    fact_indices.sort_unstable();
+    let nl_story = template_renderer
+        .render(&query, &instance, Some(&fact_indices))
+        .await?;
 
     let puzzle_text = match args.llm_provider {
         Some(provider) => {

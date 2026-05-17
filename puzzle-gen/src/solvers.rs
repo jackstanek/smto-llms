@@ -7,13 +7,22 @@ pub mod smt;
 
 pub use smt::SmtBackend;
 
+/// Subset of axioms + ground facts that the SMT solver reported as load-bearing
+/// for a particular entailment verdict. `facts` are indices into the loaded
+/// instance's `facts()` slice (see [`Instance::facts`]).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Core {
+    pub axioms: Vec<AxiomId>,
+    pub facts: Vec<usize>,
+}
+
 /// Result of an entailment check.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum QueryResult {
     /// T union F entails q.
-    Entailed { core: Vec<AxiomId> },
+    Entailed { core: Core },
     /// T union F entails not-q.
-    Refuted { core: Vec<AxiomId> },
+    Refuted { core: Core },
     /// Neither entailed nor refuted.
     Undetermined,
 }

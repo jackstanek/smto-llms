@@ -11,9 +11,15 @@ pub trait Renderer {
     /// Error type for rendering.
     type Error;
 
-    /// Render an instance in natural language.
-    async fn render(&self, query: &Formula, instance: &Instance<'_>)
-    -> Result<String, Self::Error>;
+    /// Render an instance in natural language. If `fact_filter` is `Some`,
+    /// only facts at those indices in `instance.facts()` are emitted —
+    /// typically a load-bearing subset taken from a [`crate::solvers::Core`].
+    async fn render(
+        &self,
+        query: &Formula,
+        instance: &Instance<'_>,
+        fact_filter: Option<&[usize]>,
+    ) -> Result<String, Self::Error>;
 }
 
 /// Mapping from domain constants to their pretty (natural language) display

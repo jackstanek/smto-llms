@@ -11,7 +11,7 @@ use smtlib::terms::{Dynamic, STerm, Sorted, StaticSorted};
 use thiserror::Error;
 
 use crate::bimulmap::BiMulMap;
-use crate::solvers::{Backend, QueryResult};
+use crate::solvers::{Backend, Core, QueryResult};
 use crate::theories::{
     Atom, Axiom, AxiomBody, AxiomId, ConstId, Formula, Instance, SortId, SymbolId, Term, VarId,
     enumerate_bindings,
@@ -161,6 +161,10 @@ pub struct SmtBackend<'st, B: smtlib::Backend> {
     // clauses (`_act_aN_i`); the reverse map lets `process_unsat_core` resolve
     // each clause in the unsat core back to its owning axiom.
     axiom_activators: BiMulMap<AxiomId, &'st str>,
+    // Ground-fact name → index into `Instance::facts()`. Each fact is asserted
+    // with `:named _fact_i` so it can appear in the unsat core; the index lets
+    // `process_unsat_core` resolve the name back to the original fact atom.
+    fact_names: HashMap<&'st str, usize>,
     // Currently-active axioms (mirrors the latest Instance's set).
     active_axioms: HashSet<AxiomId>,
 }
@@ -191,6 +195,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
             ground_fact_index: HashMap::new(),
             activator_names: Vec::new(),
             axiom_activators: BiMulMap::new(),
+            fact_names: HashMap::new(),
             active_axioms: HashSet::new(),
         })
     }
@@ -658,11 +663,15 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             }
         }
 
-        // 5. Assert ground facts.
+        // 5. Assert ground facts, each `:named` so they can appear in unsat
+        //    cores. The name maps back to the fact's index in `instance.facts()`
+        //    so the puzzle renderer can restrict output to a load-bearing subset.
         trace!("asserting ground facts");
-        for fact in instance.facts() {
+        for (i, fact) in instance.facts().iter().enumerate() {
             let b = self.translate_atom(fact, &empty_var_map);
-            self.solver.assert(b)?;
+            let name = self.st.alloc_str(&format!("_fact_{i}"));
+            self.assert_named(b, name)?;
+            self.fact_names.insert(name, i);
         }
 
         // 6. Declare an activator boolean per theory axiom and assert one
@@ -862,21 +871,28 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         pins
     }
 
-    /// Convert a get-unsat-core response into a list of axiom IDs in the core.
+    /// Convert a get-unsat-core response into the set of load-bearing axioms
+    /// and ground-fact indices.
     fn process_unsat_core(
         &self,
         core: GetUnsatCoreResponse<'_>,
-    ) -> Result<Vec<AxiomId>, SmtBackendError> {
-        let mut seen: HashSet<AxiomId> = HashSet::new();
-        let mut result = Vec::with_capacity(core.0.len());
+    ) -> Result<Core, SmtBackendError> {
+        let mut seen_axioms: HashSet<AxiomId> = HashSet::new();
+        let mut seen_facts: HashSet<usize> = HashSet::new();
+        let mut axioms = Vec::new();
+        let mut facts = Vec::new();
         for sym in core.0 {
-            if let Some(&axiom_id) = self.axiom_activators.get_key(&sym.0)
-                && seen.insert(axiom_id)
+            if let Some(&axiom_id) = self.axiom_activators.get_key(&sym.0) {
+                if seen_axioms.insert(axiom_id) {
+                    axioms.push(axiom_id);
+                }
+            } else if let Some(&idx) = self.fact_names.get(sym.0)
+                && seen_facts.insert(idx)
             {
-                result.push(axiom_id);
+                facts.push(idx);
             }
         }
-        Ok(result)
+        Ok(Core { axioms, facts })
     }
 }
 
@@ -965,12 +981,16 @@ mod tests {
         match result {
             QueryResult::Entailed { core } => {
                 assert!(
-                    core.contains(&mcf),
+                    core.axioms.contains(&mcf),
                     "core missing manages_can_fire: {core:?}"
                 );
                 assert!(
-                    !core.contains(&unrel),
+                    !core.axioms.contains(&unrel),
                     "core unexpectedly contains unrelated_rule: {core:?}"
+                );
+                assert!(
+                    !core.facts.is_empty(),
+                    "core should reference the manages fact: {core:?}"
                 );
             }
             other => panic!("expected Entailed, got {other:?}"),
@@ -1004,7 +1024,10 @@ mod tests {
         let nsf = axiom_id_by_name(&theory, "no_self_fire");
         match result {
             QueryResult::Refuted { core } => {
-                assert!(core.contains(&nsf), "core missing no_self_fire: {core:?}");
+                assert!(
+                    core.axioms.contains(&nsf),
+                    "core missing no_self_fire: {core:?}"
+                );
             }
             other => panic!("expected Refuted, got {other:?}"),
         }
@@ -1036,9 +1059,9 @@ mod tests {
             QueryResult::Entailed { core } => core.clone(),
             other => panic!("expected Entailed initially, got {other:?}"),
         };
-        assert!(!core.is_empty(), "entailed core must be non-empty");
+        assert!(!core.axioms.is_empty(), "entailed core must be non-empty");
 
-        for id in &core {
+        for id in &core.axioms {
             instance.deactivate_axiom(*id);
         }
         backend.set_active_axioms(&instance).unwrap();

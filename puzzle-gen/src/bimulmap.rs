@@ -78,6 +78,7 @@ where
     }
 
     /// Get the set of values corresponding to a key.
+    #[cfg(test)]
     pub fn get_values(&self, key: &K) -> Option<&HashSet<V>> {
         self.forward.get(key)
     }

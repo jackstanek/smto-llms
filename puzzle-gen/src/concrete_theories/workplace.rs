@@ -27,6 +27,12 @@
 //! `cwa: true` predicate with Horn rules: `completion_can_fire`,
 //! `completion_can_approve_expense`, `completion_manages_plus`.
 //!
+//! The role predicates `is_ceo` and `is_head_of_department` are `cwa: true`
+//! but have no Horn rules, so the SMT backend handles their negation
+//! unconditionally at instance load (no ablatable completion). Ground facts
+//! `is_ceo(ceo)` and `is_head_of_department(head_i, dept_i)` are emitted by
+//! the generator.
+//!
 //! # Usage
 //!
 //! ```rust,ignore
@@ -35,7 +41,7 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::{HashMap, VecDeque};
+use std::collections::VecDeque;
 use std::sync::OnceLock;
 
 use rand::{Rng, RngExt, seq::IndexedRandom};
@@ -208,6 +214,16 @@ fn build() -> Theory {
             approved_expense {
                 (employee, employee),
                 nl: "{0} approved an expense for {1}",
+                cwa: true
+            },
+            is_ceo {
+                (employee),
+                nl: "{0} is the CEO",
+                cwa: true
+            },
+            is_head_of_department {
+                (employee, department),
+                nl: "{0} is the head of {1}",
                 cwa: true
             },
         );
@@ -408,6 +424,8 @@ where
         let fired_sym = t.find_symbol("fired");
         let approved_sym = t.find_symbol("approved_expense");
         let works_in_sym = t.find_symbol("works_in");
+        let is_ceo_sym = t.find_symbol("is_ceo");
+        let is_head_sym = t.find_symbol("is_head_of_department");
 
         let mut model = GroundModel::new(t);
 
@@ -416,26 +434,25 @@ where
             .collect();
 
         let ceo = model.add_constant("ceo", employee_sort);
+        model.add_predicate_fact(is_ceo_sym, vec![ceo]);
 
         // Emit an edge p→q either as `manages(p,q)` (direct) or, with
         // probability `indirect_evidence_rate`, as one of `fired(p,q)` /
         // `approved_expense(p,q)`. The abductive-bridge axioms recover the
         // chain-of-command edge from the indirect form when active.
-        let mut emit_edge = |model: &mut GroundModel<'static>,
-                             rng: &mut R,
-                             parent: ConstId,
-                             child: ConstId| {
-            if rng.random_bool(self.indirect_evidence_rate.clamp(0.0, 1.0)) {
-                let sym = if rng.random_bool(0.5) {
-                    fired_sym
+        let mut emit_edge =
+            |model: &mut GroundModel<'static>, rng: &mut R, parent: ConstId, child: ConstId| {
+                if rng.random_bool(self.indirect_evidence_rate.clamp(0.0, 1.0)) {
+                    let sym = if rng.random_bool(0.5) {
+                        fired_sym
+                    } else {
+                        approved_sym
+                    };
+                    model.add_predicate_fact(sym, vec![parent, child]);
                 } else {
-                    approved_sym
-                };
-                model.add_predicate_fact(sym, vec![parent, child]);
-            } else {
-                model.add_predicate_fact(manages_sym, vec![parent, child]);
-            }
-        };
+                    model.add_predicate_fact(manages_sym, vec![parent, child]);
+                }
+            };
 
         // BFS frontier: (manager, depth, department).
         let mut frontier: VecDeque<(ConstId, usize, ConstId)> = VecDeque::new();
@@ -443,6 +460,7 @@ where
             let head = model.add_constant(format!("head_{i}"), employee_sort);
             emit_edge(&mut model, &mut self.rng, ceo, head);
             model.add_function_fact(works_in_sym, vec![head], dept);
+            model.add_predicate_fact(is_head_sym, vec![head, dept]);
             frontier.push_back((head, 1, dept));
         }
 
@@ -468,8 +486,9 @@ where
 /// Assigns pretty natural-language names to a workplace `Instance`'s domain
 /// constants. Stable names like `dept_0`, `head_2`, `emp_7` are mapped to
 /// real-sounding department names (Engineering, Finance, ...) and people
-/// names (Alice, Brianna, ...). The CEO becomes `"the CEO"`; each department
-/// head becomes `"the head of <pretty dept name>"`.
+/// names (Alice, Brianna, ...). The CEO and department heads receive ordinary
+/// personal names too — their role is exposed only via the `is_ceo` /
+/// `is_head_of_department` facts, not baked into how they're referred to.
 pub struct WorkplaceNameInitializer<R> {
     rng: RefCell<R>,
 }
@@ -520,27 +539,46 @@ where
         let mut rng = self.rng.borrow_mut();
 
         let dept_names = departments::random_balanced_names(&mut *rng, depts.len());
-        let mut dept_by_idx: HashMap<usize, String> = HashMap::new();
-        for (&(idx, id), name) in depts.iter().zip(dept_names.iter()) {
+        for (&(_, id), name) in depts.iter().zip(dept_names.iter()) {
             map.insert(id, name.to_string());
-            dept_by_idx.insert(idx, name.to_string());
         }
+
+        // Draw personal names for every employee — CEO, heads, and
+        // rank-and-file alike — from a single pool. We shouldn't leak the role
+        // through the rendered name; whether someone is the CEO or a department
+        // head is something the solver must infer from `is_ceo` /
+        // `is_head_of_department` facts (when rendered) or from the management
+        // structure.
+        let total_emps = ceo.is_some() as usize + heads.len() + emps.len();
+        let emp_names = names::random_balanced_names(&mut *rng, total_emps);
+        let mut name_iter = emp_names.iter();
 
         if let Some(id) = ceo {
-            map.insert(id, "the CEO".to_string());
+            map.insert(
+                id,
+                name_iter
+                    .next()
+                    .expect("name pool sized for ceo+heads+emps")
+                    .to_string(),
+            );
         }
-
-        for &(idx, id) in &heads {
-            let pretty = dept_by_idx
-                .get(&idx)
-                .cloned()
-                .unwrap_or_else(|| format!("department {idx}"));
-            map.insert(id, format!("the head of {pretty}"));
+        for &(_, id) in &heads {
+            map.insert(
+                id,
+                name_iter
+                    .next()
+                    .expect("name pool sized for ceo+heads+emps")
+                    .to_string(),
+            );
         }
-
-        let emp_names = names::random_balanced_names(&mut *rng, emps.len());
-        for (&(_, id), name) in emps.iter().zip(emp_names.iter()) {
-            map.insert(id, name.to_string());
+        for &(_, id) in &emps {
+            map.insert(
+                id,
+                name_iter
+                    .next()
+                    .expect("name pool sized for ceo+heads+emps")
+                    .to_string(),
+            );
         }
     }
 }
@@ -556,14 +594,17 @@ mod tests {
         // 2 sorts: employee, department
         assert_eq!(t.sorts().count(), 2);
 
-        // 1 function + 6 predicates (manages, can_fire, can_approve_expense,
-        // fired, approved_expense, manages_plus) = 7 symbols.
-        assert_eq!(t.symbols().count(), 7);
+        // 1 function + 8 predicates (manages, can_fire, can_approve_expense,
+        // fired, approved_expense, manages_plus, is_ceo,
+        // is_head_of_department) = 9 symbols.
+        assert_eq!(t.symbols().count(), 9);
 
         // 12 declared axioms (2 manages_plus base/step + 2 chain-of-command
         // + 2 act-coherence + 2 abductive bridges + 4 integrity) plus 3
         // auto-generated completions (can_fire, can_approve_expense,
-        // manages_plus).
+        // manages_plus). `is_ceo` and `is_head_of_department` are CWA
+        // predicates with no Horn rules, so they receive no theory-level
+        // completion — the SMT backend handles their negations at load.
         assert_eq!(t.axioms().count(), 15);
 
         // Implicit axioms: manages_plus base+step, chain-of-command x2,

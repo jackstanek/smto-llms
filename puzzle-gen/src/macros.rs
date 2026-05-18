@@ -268,6 +268,7 @@ macro_rules! theory_stmt {
     // ------------------------------------------------------------------
     ($t:ident, predicates ! ($($pred:ident $body:tt),* $(,)?)) => {
         $(
+            #[allow(unused_variables)]
             let $pred = predicate_decl!($t, $pred, $body);
         )*
     };

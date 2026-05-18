@@ -492,8 +492,6 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         }
     }
 
-    // -- Connective helpers -------------------------------------------------
-
     fn make_and(&self, bools: &[smtlib::Bool<'st>]) -> smtlib::Bool<'st> {
         match bools.len() {
             0 => smtlib::Bool::new(self.st, true),
@@ -644,10 +642,10 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
 
         let empty_var_map = HashMap::new();
 
-        // 4. Assert per-sort distinctness. Coverage is no longer needed: with
-        //    every axiom grounded over the finite domain there are no free
-        //    SMT-level variables left, so cvc5 has no reason to invent
-        //    phantom domain elements.
+        // Assert per-sort distinctness. Coverage is not needed: with every
+        // axiom grounded over the finite domain there are no free SMT-level
+        // variables left, so cvc5 has no reason to invent phantom domain
+        // elements.
         trace!("asserting domain distinctness");
         for constants in instance.domain().values() {
             let const_dynamics: Vec<Dynamic<'st>> = constants
@@ -663,9 +661,9 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             }
         }
 
-        // 5. Assert ground facts, each `:named` so they can appear in unsat
-        //    cores. The name maps back to the fact's index in `instance.facts()`
-        //    so the puzzle renderer can restrict output to a load-bearing subset.
+        // Assert ground facts, each `:named` so they can appear in unsat cores.
+        // The name maps back to the fact's index in `instance.facts()` so the
+        // puzzle renderer can restrict output to a load-bearing subset.
         trace!("asserting ground facts");
         for (i, fact) in instance.facts().iter().enumerate() {
             let b = self.translate_atom(fact, &empty_var_map);
@@ -674,10 +672,10 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
             self.fact_names.insert(name, i);
         }
 
-        // 6. Declare an activator boolean per theory axiom and assert one
-        //    `(=> activator ground_instance)` per binding of the axiom's
-        //    quantified variables over the finite domain. Toggling the
-        //    activator turns the whole axiom on/off without re-asserting.
+        // Declare an activator boolean per theory axiom and assert one `(=>
+        // activator ground_instance)` per binding of the axiom's quantified
+        // variables over the finite domain. Toggling the activator turns the
+        // whole axiom on/off without re-asserting.
         trace!("grounding and asserting axioms");
         let bool_sort = smtlib::sorts::Sort::Static(smtlib::Bool::AST_SORT);
         let mut total_ground_clauses: usize = 0;
@@ -704,10 +702,9 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         }
         trace!("asserted {} ground axiom clauses", total_ground_clauses);
 
-        // 7. Pure-CWA negations for ground-only predicates: any tuple not
-        //    asserted as a fact is asserted false. Unconditional (not gated
-        //    on any axiom activator) because they encode instance state, not
-        //    theory knowledge.
+        // Pure-CWA negations for ground-only predicates: any tuple not asserted
+        // as a fact is asserted false. Unconditional (not gated on any axiom
+        // activator) because they encode instance state, not theory knowledge.
         trace!("asserting ground-only CWA negations");
         for &sym_id in &self.ground_only_preds {
             let sig = theory
@@ -873,10 +870,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
 
     /// Convert a get-unsat-core response into the set of load-bearing axioms
     /// and ground-fact indices.
-    fn process_unsat_core(
-        &self,
-        core: GetUnsatCoreResponse<'_>,
-    ) -> Result<Core, SmtBackendError> {
+    fn process_unsat_core(&self, core: GetUnsatCoreResponse<'_>) -> Result<Core, SmtBackendError> {
         let mut seen_axioms: HashSet<AxiomId> = HashSet::new();
         let mut seen_facts: HashSet<usize> = HashSet::new();
         let mut axioms = Vec::new();

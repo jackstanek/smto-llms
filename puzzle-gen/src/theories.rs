@@ -170,6 +170,70 @@ pub enum Formula {
     Exists(Vec<(VarId, SortId)>, Box<Formula>),
 }
 
+impl Term {
+    /// Collect every [`ConstId`] that appears as a `DomainConst` in this term
+    /// (recursing into function applications).
+    pub fn collect_domain_consts(&self, out: &mut HashSet<ConstId>) {
+        match self {
+            Term::DomainConst(c) => {
+                out.insert(*c);
+            }
+            Term::App { args, .. } => args.iter().for_each(|t| t.collect_domain_consts(out)),
+            Term::Var(_) | Term::Const(_) => {}
+        }
+    }
+}
+
+impl Atom {
+    /// Collect every [`ConstId`] that appears as a `DomainConst` anywhere in
+    /// this atom's arguments.
+    pub fn collect_domain_consts(&self, out: &mut HashSet<ConstId>) {
+        match self {
+            Atom::Predicate { args, .. } => {
+                args.iter().for_each(|t| t.collect_domain_consts(out));
+            }
+            Atom::Eq(a, b) | Atom::Neq(a, b) => {
+                a.collect_domain_consts(out);
+                b.collect_domain_consts(out);
+            }
+        }
+    }
+
+    /// All domain constants mentioned in this atom.
+    pub fn domain_consts(&self) -> HashSet<ConstId> {
+        let mut out = HashSet::new();
+        self.collect_domain_consts(&mut out);
+        out
+    }
+}
+
+impl Formula {
+    /// Collect every [`ConstId`] that appears as a `DomainConst` anywhere in
+    /// this formula. Quantifier-bound variables are unaffected (they are
+    /// `Term::Var`, not domain constants).
+    pub fn collect_domain_consts(&self, out: &mut HashSet<ConstId>) {
+        match self {
+            Formula::Atom(a) => a.collect_domain_consts(out),
+            Formula::And(fs) | Formula::Or(fs) => {
+                fs.iter().for_each(|f| f.collect_domain_consts(out));
+            }
+            Formula::Not(f) => f.collect_domain_consts(out),
+            Formula::Implies(p, q) => {
+                p.collect_domain_consts(out);
+                q.collect_domain_consts(out);
+            }
+            Formula::Forall(_, body) | Formula::Exists(_, body) => body.collect_domain_consts(out),
+        }
+    }
+
+    /// All domain constants mentioned in this formula.
+    pub fn domain_consts(&self) -> HashSet<ConstId> {
+        let mut out = HashSet::new();
+        self.collect_domain_consts(&mut out);
+        out
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum AxiomBody {
     /// Horn clauses: conjoined body clauses imply head.

@@ -16,6 +16,8 @@
 //! | A2 | `chain_of_command_can_approve` | true | A3/A4 in reference |
 //! | C1 | `fired_implies_authority` | false | C1 in reference |
 //! | C2 | `approved_implies_authority` | false | C2 in reference |
+//! | C3 | `fired_implies_chain` | true | abductive bridge for indirect facts |
+//! | C4 | `approved_implies_chain` | true | abductive bridge for indirect facts |
 //! | I1 | `no_self_fire` | true | I1 in reference |
 //! | I2 | `no_self_approve` | true | I2 in reference |
 //! | I3 | `no_self_manage` | true | S6/structural |
@@ -277,6 +279,36 @@ fn build() -> Theory {
         };
 
         // ------------------------------------------------------------------
+        // C3. Abductive bridge: if p fired q, then p is above q in the
+        // chain of command. The puzzle generator can replace a direct
+        // `manages` fact with `fired(p,q)`; this axiom is what re-derives
+        // the missing chain edge. Implicit / ablatable — the oracle is
+        // expected to supply it.
+        // ------------------------------------------------------------------
+        horn! {
+            name:     "fired_implies_chain",
+            implicit: true,
+            nl: "If p fired q, then p is somewhere above q in the management chain.",
+            forall (p: employee, q: employee) {
+                body: fired(p, q);
+                head: manages_plus(p, q);
+            }
+        };
+
+        // ------------------------------------------------------------------
+        // C4. Abductive bridge: expense approval implies chain-of-command.
+        // ------------------------------------------------------------------
+        horn! {
+            name:     "approved_implies_chain",
+            implicit: true,
+            nl: "If p approved q's expense, then p is somewhere above q in the management chain.",
+            forall (p: employee, q: employee) {
+                body: approved_expense(p, q);
+                head: manages_plus(p, q);
+            }
+        };
+
+        // ------------------------------------------------------------------
         // I1. No one can fire themselves.
         // ------------------------------------------------------------------
         integrity! {
@@ -335,6 +367,13 @@ pub struct WorkplaceGenerator<R> {
     offspring_distr: Poisson<f64>,
     max_depth: usize,
     n_departments: usize,
+    /// Probability that a given `manages(p,q)` edge is emitted indirectly as
+    /// `fired(p,q)` or `approved_expense(p,q)` instead of as a direct
+    /// `manages` fact. The abductive-bridge axioms (`fired_implies_chain`,
+    /// `approved_implies_chain`) restore the chain-of-command edge when the
+    /// oracle is consulted; ablating those axioms turns these edges into
+    /// dead ends for the puzzle solver.
+    indirect_evidence_rate: f64,
 }
 
 impl<R> WorkplaceGenerator<R> {
@@ -345,12 +384,14 @@ impl<R> WorkplaceGenerator<R> {
         span_of_control: f64,
         max_depth: usize,
         n_departments: usize,
+        indirect_evidence_rate: f64,
     ) -> Result<Self, rand_distr::PoissonError> {
         Poisson::new(span_of_control).map(|offspring_distr| Self {
             rng,
             offspring_distr,
             max_depth,
             n_departments,
+            indirect_evidence_rate,
         })
     }
 }
@@ -364,6 +405,8 @@ where
         let employee_sort = t.find_sort("employee");
         let department_sort = t.find_sort("department");
         let manages_sym = t.find_symbol("manages");
+        let fired_sym = t.find_symbol("fired");
+        let approved_sym = t.find_symbol("approved_expense");
         let works_in_sym = t.find_symbol("works_in");
 
         let mut model = GroundModel::new(t);
@@ -374,11 +417,31 @@ where
 
         let ceo = model.add_constant("ceo", employee_sort);
 
+        // Emit an edge p→q either as `manages(p,q)` (direct) or, with
+        // probability `indirect_evidence_rate`, as one of `fired(p,q)` /
+        // `approved_expense(p,q)`. The abductive-bridge axioms recover the
+        // chain-of-command edge from the indirect form when active.
+        let mut emit_edge = |model: &mut GroundModel<'static>,
+                             rng: &mut R,
+                             parent: ConstId,
+                             child: ConstId| {
+            if rng.random_bool(self.indirect_evidence_rate.clamp(0.0, 1.0)) {
+                let sym = if rng.random_bool(0.5) {
+                    fired_sym
+                } else {
+                    approved_sym
+                };
+                model.add_predicate_fact(sym, vec![parent, child]);
+            } else {
+                model.add_predicate_fact(manages_sym, vec![parent, child]);
+            }
+        };
+
         // BFS frontier: (manager, depth, department).
         let mut frontier: VecDeque<(ConstId, usize, ConstId)> = VecDeque::new();
         for (i, &dept) in departments.iter().enumerate() {
             let head = model.add_constant(format!("head_{i}"), employee_sort);
-            model.add_predicate_fact(manages_sym, vec![ceo, head]);
+            emit_edge(&mut model, &mut self.rng, ceo, head);
             model.add_function_fact(works_in_sym, vec![head], dept);
             frontier.push_back((head, 1, dept));
         }
@@ -392,7 +455,7 @@ where
             for _ in 0..n_children {
                 let child = model.add_constant(format!("emp_{next_id}"), employee_sort);
                 next_id += 1;
-                model.add_predicate_fact(manages_sym, vec![parent, child]);
+                emit_edge(&mut model, &mut self.rng, parent, child);
                 model.add_function_fact(works_in_sym, vec![child], dept);
                 frontier.push_back((child, depth + 1, dept));
             }
@@ -497,18 +560,20 @@ mod tests {
         // fired, approved_expense, manages_plus) = 7 symbols.
         assert_eq!(t.symbols().count(), 7);
 
-        // 10 declared axioms (2 manages_plus base/step + 2 chain-of-command
-        // + 2 act-coherence + 4 integrity) plus 3 auto-generated completions
-        // (can_fire, can_approve_expense, manages_plus).
-        assert_eq!(t.axioms().count(), 13);
+        // 12 declared axioms (2 manages_plus base/step + 2 chain-of-command
+        // + 2 act-coherence + 2 abductive bridges + 4 integrity) plus 3
+        // auto-generated completions (can_fire, can_approve_expense,
+        // manages_plus).
+        assert_eq!(t.axioms().count(), 15);
 
         // Implicit axioms: manages_plus base+step, chain-of-command x2,
-        // no_self_* x3, manages_antisymmetry, 3 completions = 11.
+        // 2 abductive bridges, no_self_* x3, manages_antisymmetry, 3
+        // completions = 13.
         let implicit: Vec<_> = t
             .axioms()
             .filter(|(_, a)| a.implicit_by_default())
             .collect();
-        assert_eq!(implicit.len(), 11);
+        assert_eq!(implicit.len(), 13);
 
         // Spot-check names
         let names: std::collections::HashSet<&str> = t.axioms().map(|(_, a)| a.name()).collect();

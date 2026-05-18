@@ -20,6 +20,7 @@ use crate::theories::{
     AblationStrategy, AllAtOnceAblation, Instance, ModelGenerator, QueryGenerator,
     StochasticAblation,
 };
+use std::collections::HashSet;
 
 #[macro_use]
 mod macros;
@@ -60,6 +61,13 @@ struct Args {
     /// Mean span of control (Poisson rate) for direct reports.
     #[arg(long, default_value_t = 2.0)]
     span_of_control: f64,
+
+    /// Probability that a management edge is encoded indirectly as a
+    /// `fired` / `approved_expense` fact instead of a direct `manages`
+    /// fact. The abductive bridge axioms restore the chain when active;
+    /// ablating them turns indirect edges into oracle-only inferences.
+    #[arg(long, default_value_t = 0.0)]
+    indirect_evidence_rate: f64,
 
     /// PRNG seed.
     #[arg(long, default_value_t = 0)]
@@ -129,6 +137,7 @@ async fn main() -> anyhow::Result<()> {
         args.span_of_control,
         args.max_depth,
         args.n_departments,
+        args.indirect_evidence_rate,
     )
     .context("invalid Poisson distribution")?;
     let model = model_gen.generate();
@@ -236,10 +245,20 @@ async fn main() -> anyhow::Result<()> {
     let name_initializer =
         WorkplaceNameInitializer::new(rand::rngs::StdRng::seed_from_u64(args.seed.wrapping_add(3)));
     let template_renderer = TemplateRenderer::new(name_initializer);
-    // Restrict the rendered facts to the load-bearing subset identified by
-    // the unsat core under the full theory — the minimum the oracle-equipped
-    // solver needs to decide the query.
-    let mut fact_indices = initial_core.facts.clone();
+    // Restrict the rendered facts to: the load-bearing subset identified by
+    // the unsat core under the full theory, plus every fact that mentions a
+    // domain constant from the query. The neighborhood facts give CWA
+    // refutations the context the empty core can't supply, and keep the
+    // render rule uniform across Entailed/Refuted puzzles so the fact-set
+    // shape doesn't leak the answer at the dataset level.
+    let query_consts = query.domain_consts();
+    let mut fact_set: HashSet<usize> = initial_core.facts.iter().copied().collect();
+    for (i, fact) in instance.facts().iter().enumerate() {
+        if !fact.domain_consts().is_disjoint(&query_consts) {
+            fact_set.insert(i);
+        }
+    }
+    let mut fact_indices: Vec<usize> = fact_set.into_iter().collect();
     fact_indices.sort_unstable();
     let nl_story = template_renderer
         .render(&query, &instance, Some(&fact_indices))

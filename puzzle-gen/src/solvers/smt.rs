@@ -105,6 +105,29 @@ fn body_conjuncts(f: &Formula) -> Vec<&Atom> {
     }
 }
 
+/// Collect every predicate symbol that appears anywhere in `f`. Used to
+/// exclude General-axiom-mentioned predicates from ground-only CWA treatment.
+fn collect_formula_predicates(f: &Formula, out: &mut HashSet<SymbolId>) {
+    match f {
+        Formula::Atom(a) => {
+            if let Atom::Predicate { symbol, .. } = a {
+                out.insert(*symbol);
+            }
+        }
+        Formula::And(fs) | Formula::Or(fs) => {
+            for g in fs {
+                collect_formula_predicates(g, out);
+            }
+        }
+        Formula::Not(g) => collect_formula_predicates(g, out),
+        Formula::Implies(p, q) => {
+            collect_formula_predicates(p, out);
+            collect_formula_predicates(q, out);
+        }
+        Formula::Forall(_, g) | Formula::Exists(_, g) => collect_formula_predicates(g, out),
+    }
+}
+
 /// Enumerate all ground tuples for a sequence of sort IDs.
 fn enumerate_ground_tuples(
     sorts: &[SortId],
@@ -205,6 +228,7 @@ impl<'st, B: smtlib::Backend> SmtBackend<'st, B> {
         &mut self,
         cmd: ast::Command<'st>,
     ) -> Result<Option<SpecificSuccessResponse<'st>>, SmtBackendError> {
+        trace!("> {}", cmd);
         let resp = self.solver.run_command(cmd)?;
         match resp {
             GeneralResponse::Success => Ok(None),
@@ -600,10 +624,15 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
         self.smt_domain = instance.domain().clone();
 
         // Identify "ground-only" predicates and index their facts. A predicate
-        // is ground-only iff it is closed-world and has no Horn rule producing
-        // it — its truth set is then exactly the set of ground facts in the
-        // instance. We use this both to specialize binding enumeration in
-        // `ground_axiom` and to emit the CWA negations below.
+        // is ground-only iff it is closed-world, has no Horn rule producing
+        // it, AND is not referenced by any General axiom. The General-axiom
+        // exclusion is conservative: any predicate that appears in a General
+        // formula might be derivable (or constrained) by that formula, so we
+        // can't safely emit unconditional CWA negations for it — those
+        // negations would clobber the derivation. The truth set of a true
+        // ground-only predicate is then exactly the set of ground facts in
+        // the instance. We use this both to specialize binding enumeration
+        // in `ground_axiom` and to emit the CWA negations below.
         let horn_heads: HashSet<SymbolId> = theory
             .axioms()
             .filter_map(|(_, a)| match a.body() {
@@ -614,11 +643,21 @@ impl<'st, B: smtlib::Backend> Backend for SmtBackend<'st, B> {
                 _ => None,
             })
             .collect();
+        let mut general_preds: HashSet<SymbolId> = HashSet::new();
+        for (_, ax) in theory.axioms() {
+            if let AxiomBody::General(f) = ax.body() {
+                collect_formula_predicates(f, &mut general_preds);
+            }
+        }
         for (sym_id, decl) in theory.symbols() {
             let Some(sig) = decl.signature() else {
                 continue;
             };
-            if sig.closed_world() && sig.ret().is_none() && !horn_heads.contains(&sym_id) {
+            if sig.closed_world()
+                && sig.ret().is_none()
+                && !horn_heads.contains(&sym_id)
+                && !general_preds.contains(&sym_id)
+            {
                 self.ground_only_preds.insert(sym_id);
             }
         }

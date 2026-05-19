@@ -619,12 +619,17 @@ impl Theory {
                 }
             }
 
-            let rename_term = |t: &Term| -> Term {
+            fn rename_term_rec(t: &Term, rename: &HashMap<VarId, VarId>) -> Term {
                 match t {
                     Term::Var(v) => Term::Var(*rename.get(v).unwrap_or(v)),
+                    Term::App { symbol, args } => Term::App {
+                        symbol: *symbol,
+                        args: args.iter().map(|a| rename_term_rec(a, rename)).collect(),
+                    },
                     other => other.clone(),
                 }
-            };
+            }
+            let rename_term = |t: &Term| -> Term { rename_term_rec(t, &rename) };
             let rename_atom = |a: &Atom| -> Atom {
                 match a {
                     Atom::Predicate { symbol, args } => Atom::Predicate {

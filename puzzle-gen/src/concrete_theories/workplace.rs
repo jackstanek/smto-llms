@@ -29,8 +29,8 @@
 //! `completion_has_manager`.
 //!
 //! Role predicates are oracle-recoverable, not asserted as ground facts:
-//! `is_ceo` is derived by the General axiom `no_manager_is_ceo`
-//! (∀y. ¬has_manager(y) → is_ceo(y)), and `is_head_of_department` is derived
+//! `is_ceo` is fixed by the General axiom `is_ceo_iff_no_manager`
+//! (∀y. is_ceo(y) ↔ ¬has_manager(y)), and `is_head_of_department` is derived
 //! by the Horn rule `head_of_department_via_ceo` (the CEO's direct reports
 //! head the department they work in). The generator emits no `is_ceo` or
 //! `is_head_of_department` facts.
@@ -43,7 +43,7 @@
 //! ```
 
 use std::cell::RefCell;
-use std::collections::VecDeque;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
 use rand::{Rng, RngExt, seq::IndexedRandom};
@@ -69,19 +69,19 @@ pub fn theory() -> &'static Theory {
 
 /// Sampler for workplace puzzle queries.
 ///
-/// Picks an authority predicate (`can_fire` or `can_approve_expense`) and an
-/// ordered pair of employees. Two flavors, sampled with equal probability:
+/// Picks one of three query categories with equal probability:
 ///
-/// - **Yes-query**: a derived authority atom from the LFP. Ground-truth
-///   answer is "yes" (entailed); ablating a load-bearing Horn axiom can
-///   render it underdetermined.
-/// - **No-query**: a self-pair `pred(p, p)`, forbidden by the
-///   `no_self_fire` / `no_self_approve` integrity axioms. Ground-truth
-///   answer is "no" (refuted); ablating the relevant integrity axiom
-///   renders it underdetermined.
+/// - **Authority**: `can_fire(p, q)` or `can_approve_expense(p, q)`. Yes
+///   form uses the Horn-rule LFP; no form picks a non-derived pair so the
+///   completion / integrity axioms supply the negation.
+/// - **CEO**: `is_ceo(p)`. Identified structurally via the generator's
+///   stable name for the CEO constant (`ceo`).
+/// - **Department head**: `is_head_of_department(p, d)`. Yes form uses the
+///   `head_i`/`dept_i` stable-name convention; no form picks a non-head
+///   pair (including non-head employees of the correct department).
 ///
-/// Both flavors restrict to derived predicates so the puzzle exercises the
-/// implicit theory.
+/// All flavors target predicates that are oracle-recoverable rather than
+/// directly asserted, so the puzzle exercises the implicit theory.
 pub struct WorkplaceQueryGenerator<R> {
     rng: R,
 }
@@ -97,11 +97,32 @@ where
     R: Rng,
 {
     fn generate(&mut self, model: &GroundModel<'static>) -> Formula {
+        let category = ["authority", "is_ceo", "is_head"]
+            .choose(&mut self.rng)
+            .copied()
+            .unwrap();
+        let yes_query = self.rng.random_bool(0.5);
+
+        let atom = match category {
+            "authority" => self.gen_authority_atom(model, yes_query),
+            "is_ceo" => self.gen_is_ceo_atom(model, yes_query),
+            "is_head" => self.gen_is_head_atom(model, yes_query),
+            _ => unreachable!(),
+        };
+        Formula::Atom(atom)
+    }
+}
+
+impl<R> WorkplaceQueryGenerator<R>
+where
+    R: Rng,
+{
+    /// `can_fire(p, q)` or `can_approve_expense(p, q)`. Yes uses LFP-derived
+    /// pairs (p ≠ q); no uses any pair not in the LFP, including self-pairs.
+    fn gen_authority_atom(&mut self, model: &GroundModel<'static>, yes_query: bool) -> Atom {
         let t = model.theory();
         let can_fire_sym = t.find_symbol("can_fire");
         let can_approve_sym = t.find_symbol("can_approve_expense");
-
-        let yes_query = self.rng.random_bool(0.5);
         let (sym, p, q) = if yes_query {
             let lfp = model.entailed_predicates();
             let derived: Vec<(SymbolId, ConstId, ConstId)> = lfp
@@ -123,9 +144,6 @@ where
             );
             *derived.choose(&mut self.rng).unwrap()
         } else {
-            // Pick any pair (p, q) such that the predicate does NOT hold under
-            // the full theory. Includes self-pairs (forbidden by no_self_*)
-            // and unrelated pairs (forbidden by the predicate's completion).
             let employee_sort = t.find_sort("employee");
             let employees: &[ConstId] = model
                 .domain()
@@ -149,12 +167,124 @@ where
             );
             *candidates.choose(&mut self.rng).unwrap()
         };
-
-        Formula::Atom(Atom::Predicate {
+        Atom::Predicate {
             symbol: sym,
             args: vec![Term::DomainConst(p), Term::DomainConst(q)],
-        })
+        }
     }
+
+    /// `is_ceo(p)`. CEO is identified by the generator's stable name `ceo`.
+    fn gen_is_ceo_atom(&mut self, model: &GroundModel<'static>, yes_query: bool) -> Atom {
+        let t = model.theory();
+        let is_ceo_sym = t.find_symbol("is_ceo");
+        let (ceo, others) = ceo_and_others(model);
+        let p = if yes_query {
+            ceo
+        } else {
+            *others
+                .choose(&mut self.rng)
+                .expect("workplace instance has at least one non-CEO employee")
+        };
+        Atom::Predicate {
+            symbol: is_ceo_sym,
+            args: vec![Term::DomainConst(p)],
+        }
+    }
+
+    /// `is_head_of_department(p, d)`. Heads identified by stable names
+    /// `head_i` paired with `dept_i`.
+    fn gen_is_head_atom(&mut self, model: &GroundModel<'static>, yes_query: bool) -> Atom {
+        let t = model.theory();
+        let is_head_sym = t.find_symbol("is_head_of_department");
+        let department_sort = t.find_sort("department");
+        let employee_sort = t.find_sort("employee");
+
+        let heads = heads_by_dept(model);
+        let employees: &[ConstId] = model
+            .domain()
+            .get(&employee_sort)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let departments: &[ConstId] = model
+            .domain()
+            .get(&department_sort)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+
+        let (p, d) = if yes_query {
+            assert!(!heads.is_empty(), "instance has no department heads");
+            *heads.choose(&mut self.rng).unwrap()
+        } else {
+            let head_set: HashSet<(ConstId, ConstId)> = heads.iter().copied().collect();
+            let mut candidates: Vec<(ConstId, ConstId)> = Vec::new();
+            for &p in employees {
+                for &d in departments {
+                    if !head_set.contains(&(p, d)) {
+                        candidates.push((p, d));
+                    }
+                }
+            }
+            assert!(
+                !candidates.is_empty(),
+                "no non-head (employee, department) pairs available"
+            );
+            *candidates.choose(&mut self.rng).unwrap()
+        };
+
+        Atom::Predicate {
+            symbol: is_head_sym,
+            args: vec![Term::DomainConst(p), Term::DomainConst(d)],
+        }
+    }
+}
+
+/// Split the model's employees into (ceo, non-ceo) using the generator's
+/// stable name convention (`ceo` for the CEO, `head_i` / `emp_i` for the rest).
+fn ceo_and_others(model: &GroundModel<'_>) -> (ConstId, Vec<ConstId>) {
+    let theory = model.theory();
+    let employee_sort = theory.find_sort("employee");
+    let mut ceo: Option<ConstId> = None;
+    let mut others: Vec<ConstId> = Vec::new();
+    for (id, decl) in model.constants() {
+        if decl.sort() != employee_sort {
+            continue;
+        }
+        if decl.name() == "ceo" {
+            ceo = Some(id);
+        } else {
+            others.push(id);
+        }
+    }
+    (
+        ceo.expect("workplace generator must allocate a CEO constant named `ceo`"),
+        others,
+    )
+}
+
+/// Recover the (head_i, dept_i) pairs the generator emitted, by matching stable
+/// names. Returned in arbitrary order.
+fn heads_by_dept(model: &GroundModel<'_>) -> Vec<(ConstId, ConstId)> {
+    let theory = model.theory();
+    let employee_sort = theory.find_sort("employee");
+    let department_sort = theory.find_sort("department");
+    let mut heads: HashMap<usize, ConstId> = HashMap::new();
+    let mut depts: HashMap<usize, ConstId> = HashMap::new();
+    for (id, decl) in model.constants() {
+        let stable = decl.name();
+        if decl.sort() == employee_sort {
+            if let Some(i) = stable.strip_prefix("head_").and_then(|s| s.parse().ok()) {
+                heads.insert(i, id);
+            }
+        } else if decl.sort() == department_sort
+            && let Some(i) = stable.strip_prefix("dept_").and_then(|s| s.parse().ok())
+        {
+            depts.insert(i, id);
+        }
+    }
+    heads
+        .into_iter()
+        .filter_map(|(i, h)| depts.get(&i).map(|&d| (h, d)))
+        .collect()
 }
 
 /// Construct the workplace `Theory`.  Called at most once by [`theory`].
@@ -413,10 +543,12 @@ fn build() -> Theory {
     };
 
     // ------------------------------------------------------------------
-    // Stratified-negation step: the CEO is the unique employee with no
-    // manager. Phrased as ∀y. ¬has_manager(y) → is_ceo(y). Hand-built as a
-    // `General` axiom because the negation in the antecedent puts it outside
-    // the Horn fragment.
+    // Stratified-negation step: the CEO is *exactly* the employee with no
+    // manager. Phrased as the biconditional ∀y. is_ceo(y) ↔ ¬has_manager(y),
+    // encoded as the conjunction of both implications. Hand-built as a
+    // `General` axiom because the negation puts it outside the Horn fragment.
+    // The reverse direction (has_manager(y) → ¬is_ceo(y)) is what lets the
+    // SMT solver refute `is_ceo(p)` for non-CEO employees.
     // ------------------------------------------------------------------
     {
         use crate::theories::{Atom, AxiomBody, AxiomKind, AxiomMeta, Formula, Term, VarId};
@@ -426,23 +558,24 @@ fn build() -> Theory {
         let is_ceo = t.find_symbol("is_ceo");
         let y = VarId(0);
 
-        let body = Formula::Forall(
-            vec![(y, employee)],
-            Box::new(Formula::Implies(
-                Box::new(Formula::Not(Box::new(Formula::Atom(Atom::Predicate {
-                    symbol: has_manager,
-                    args: vec![Term::Var(y)],
-                })))),
-                Box::new(Formula::Atom(Atom::Predicate {
-                    symbol: is_ceo,
-                    args: vec![Term::Var(y)],
-                })),
-            )),
-        );
+        let is_ceo_y = Formula::Atom(Atom::Predicate {
+            symbol: is_ceo,
+            args: vec![Term::Var(y)],
+        });
+        let has_manager_y = Formula::Atom(Atom::Predicate {
+            symbol: has_manager,
+            args: vec![Term::Var(y)],
+        });
+        let not_has_manager_y = Formula::Not(Box::new(has_manager_y));
+        let iff = Formula::And(vec![
+            Formula::Implies(Box::new(not_has_manager_y.clone()), Box::new(is_ceo_y.clone())),
+            Formula::Implies(Box::new(is_ceo_y), Box::new(not_has_manager_y)),
+        ]);
+        let body = Formula::Forall(vec![(y, employee)], Box::new(iff));
         let meta = AxiomMeta::new_nl(
-            "no_manager_is_ceo",
+            "is_ceo_iff_no_manager",
             AxiomKind::Implicit,
-            "Someone who has no manager is the CEO.",
+            "The CEO is exactly the employee who has no manager.",
             vec![],
         );
         t.add_axiom(meta, vec![], AxiomBody::General(body));
@@ -673,7 +806,7 @@ mod tests {
         // 15 declared axioms (2 manages_plus base/step + has_manager Horn
         // + head_of_department_via_ceo Horn + 2 chain-of-command + 2
         // act-coherence + 2 abductive bridges + 4 integrity +
-        // no_manager_is_ceo General) plus 5 auto-generated completions
+        // is_ceo_iff_no_manager General) plus 5 auto-generated completions
         // (can_fire, can_approve_expense, manages_plus, has_manager,
         // is_head_of_department). `is_ceo` has no Horn rule, so it receives
         // no theory-level completion — and the SMT backend excludes it from
@@ -683,7 +816,7 @@ mod tests {
 
         // Implicit axioms: manages_plus base+step, has_manager Horn,
         // head_of_department_via_ceo Horn, chain-of-command x2, 2 abductive
-        // bridges, no_self_* x3, manages_antisymmetry, no_manager_is_ceo,
+        // bridges, no_self_* x3, manages_antisymmetry, is_ceo_iff_no_manager,
         // 5 completions = 18.
         let implicit: Vec<_> = t
             .axioms()

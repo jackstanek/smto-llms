@@ -226,6 +226,11 @@ fn build() -> Theory {
                 nl: "{0} is the head of {1}",
                 cwa: true
             },
+            has_manager {
+                (employee),
+                nl: "{0} has a manager",
+                cwa: true
+            },
         );
 
         // ------------------------------------------------------------------
@@ -239,6 +244,22 @@ fn build() -> Theory {
                 nl: "{0} is somewhere above {1} in the management chain"
             },
         );
+
+        // ------------------------------------------------------------------
+        // Auxiliary: `has_manager` — used as the positive half of the
+        // stratified-negation step that derives `is_ceo` (∀y. ¬has_manager(y)
+        // → is_ceo(y)). Keeping it as its own predicate isolates the negation
+        // to one place.
+        // ------------------------------------------------------------------
+        horn! {
+            name:     "has_manager",
+            implicit: true,
+            nl:       "If someone manages q, then q has a manager.",
+            forall (p: employee, q: employee) {
+                body: manages(p, q);
+                head: has_manager(q);
+            }
+        };
 
         // ------------------------------------------------------------------
         // A. Anywhere in the chain-of-command grants firing authority.
@@ -594,27 +615,28 @@ mod tests {
         // 2 sorts: employee, department
         assert_eq!(t.sorts().count(), 2);
 
-        // 1 function + 8 predicates (manages, can_fire, can_approve_expense,
+        // 1 function + 9 predicates (manages, can_fire, can_approve_expense,
         // fired, approved_expense, manages_plus, is_ceo,
-        // is_head_of_department) = 9 symbols.
-        assert_eq!(t.symbols().count(), 9);
+        // is_head_of_department, has_manager) = 10 symbols.
+        assert_eq!(t.symbols().count(), 10);
 
-        // 12 declared axioms (2 manages_plus base/step + 2 chain-of-command
-        // + 2 act-coherence + 2 abductive bridges + 4 integrity) plus 3
-        // auto-generated completions (can_fire, can_approve_expense,
-        // manages_plus). `is_ceo` and `is_head_of_department` are CWA
-        // predicates with no Horn rules, so they receive no theory-level
-        // completion — the SMT backend handles their negations at load.
-        assert_eq!(t.axioms().count(), 15);
+        // 13 declared axioms (2 manages_plus base/step + has_manager Horn
+        // + 2 chain-of-command + 2 act-coherence + 2 abductive bridges + 4
+        // integrity) plus 4 auto-generated completions (can_fire,
+        // can_approve_expense, manages_plus, has_manager). `is_ceo` and
+        // `is_head_of_department` are CWA predicates with no Horn rules, so
+        // they receive no theory-level completion — the SMT backend handles
+        // their negations at load.
+        assert_eq!(t.axioms().count(), 17);
 
-        // Implicit axioms: manages_plus base+step, chain-of-command x2,
-        // 2 abductive bridges, no_self_* x3, manages_antisymmetry, 3
-        // completions = 13.
+        // Implicit axioms: manages_plus base+step, has_manager Horn,
+        // chain-of-command x2, 2 abductive bridges, no_self_* x3,
+        // manages_antisymmetry, 4 completions = 15.
         let implicit: Vec<_> = t
             .axioms()
             .filter(|(_, a)| a.implicit_by_default())
             .collect();
-        assert_eq!(implicit.len(), 13);
+        assert_eq!(implicit.len(), 15);
 
         // Spot-check names
         let names: std::collections::HashSet<&str> = t.axioms().map(|(_, a)| a.name()).collect();

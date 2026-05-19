@@ -68,6 +68,27 @@
 // functions!. Returning a `SymbolId` so the call site can `let`-bind it.
 // ---------------------------------------------------------------------------
 
+/// Builds a single atom for a Horn (or integrity) rule body. Two shapes:
+///   `pred(args)`            -> Atom::Predicate
+///   `func(args) = ident`    -> Atom::Eq(Term::App, Term::Var)  (function-equality)
+macro_rules! horn_body_atom {
+    ($sym:ident ( $($a:ident),* $(,)? ) = $rhs:ident) => {
+        $crate::theories::Atom::Eq(
+            $crate::theories::Term::App {
+                symbol: $sym,
+                args: vec![ $( $crate::theories::Term::Var($a) ),* ],
+            },
+            $crate::theories::Term::Var($rhs),
+        )
+    };
+    ($sym:ident ( $($a:ident),* $(,)? )) => {
+        $crate::theories::Atom::Predicate {
+            symbol: $sym,
+            args: vec![ $( $crate::theories::Term::Var($a) ),* ],
+        }
+    };
+}
+
 macro_rules! predicate_decl {
     ($t:ident, $pred:ident, { ( $($param:ident),* $(,)? ), nl: $nl:expr, cwa: $cwa:expr $(,)? }) => {
         $t.declare_predicate(stringify!($pred), vec![$($param),*], Some($nl), $cwa)
@@ -325,7 +346,7 @@ macro_rules! theory_stmt {
         implicit: $implicit:expr,
         nl:       $nl:expr,
         forall ($($var:ident : $sort_var:ident),* $(,)?) {
-            body: $($bpred:ident ( $($barg:ident),* )),+ $(,)? ;
+            body: $( $bsym:ident ( $($barg:ident),* $(,)? ) $(= $bval:ident)? ),+ $(,)? ;
             head: $hpred:ident ( $($harg:ident),* ) $(,)? ;
         }
     }) => {
@@ -343,10 +364,7 @@ macro_rules! theory_stmt {
                 vec![$(($var, $sort_var)),*];
             let __body: Vec<$crate::theories::Atom> = vec![
                 $(
-                    $crate::theories::Atom::Predicate {
-                        symbol: $bpred,
-                        args: vec![$( $crate::theories::Term::Var($barg) ),*],
-                    }
+                    horn_body_atom!( $bsym ( $($barg),* ) $(= $bval)? )
                 ),+
             ];
             let __head = $crate::theories::Atom::Predicate {

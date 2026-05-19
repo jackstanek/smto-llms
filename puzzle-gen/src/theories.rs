@@ -1095,4 +1095,47 @@ mod tests {
         let implicit_count = t.axioms().filter(|(_, a)| a.implicit_by_default()).count();
         assert_eq!(implicit_count, 2);
     }
+
+    /// Verifies the horn! macro accepts function-equality atoms (`f(args) = v`)
+    /// in the body and lowers them to `Atom::Eq(Term::App, Term::Var)`.
+    #[test]
+    fn horn_body_supports_function_equality() {
+        use super::*;
+
+        let t = theory! {
+            sorts!(employee, department);
+
+            predicates!(
+                is_ceo { (employee) },
+                manages { (employee, employee) },
+                is_head_of_department { (employee, department) },
+            );
+
+            functions!(
+                works_in { (employee) -> department },
+            );
+
+            horn! {
+                name:     "head_via_ceo",
+                implicit: true,
+                nl:       "If the CEO manages p and p works in d, then p heads d",
+                forall (c: employee, p: employee, d: department) {
+                    body: is_ceo(c), manages(c, p), works_in(p) = d;
+                    head: is_head_of_department(p, d);
+                }
+            };
+        };
+
+        let (_, ax) = t.axioms().next().expect("axiom present");
+        match ax.body() {
+            AxiomBody::Horn { body, .. } => {
+                assert_eq!(body.len(), 3);
+                match &body[2] {
+                    Atom::Eq(Term::App { .. }, Term::Var(_)) => {}
+                    other => panic!("expected function-equality atom, got {:?}", other),
+                }
+            }
+            other => panic!("expected Horn body, got {:?}", other),
+        }
+    }
 }

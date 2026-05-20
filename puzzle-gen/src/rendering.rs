@@ -16,6 +16,7 @@ pub trait Renderer {
     /// typically a load-bearing subset taken from a [`crate::solvers::Core`].
     async fn render(
         &self,
+        initializer: &mut impl NameInitializer,
         query: &Formula,
         instance: &Instance<'_>,
         fact_filter: Option<&[usize]>,
@@ -30,5 +31,5 @@ pub type NameMap = HashMap<ConstId, String>;
 /// Initializer for the name map: assigns a natural-language display name to
 /// each domain constant in an `Instance`.
 pub trait NameInitializer {
-    fn init_map(&self, instance: &Instance<'_>, map: &mut NameMap);
+    fn init_map(&mut self, instance: &Instance<'_>, map: &mut NameMap);
 }

@@ -24,33 +24,26 @@ struct TheoryTemplate {
 /// Template renderer for concrete theories. Uses the symbol-level
 /// `nl_template` strings together with a per-instance `NameMap` (built by
 /// the `NameInitializer`) to render facts and the query as prose.
-pub struct TemplateRenderer<I> {
-    initializer: I,
-}
+pub struct TemplateRenderer {}
 
-impl<I> TemplateRenderer<I>
-where
-    I: NameInitializer,
-{
-    pub fn new(initializer: I) -> Self {
-        Self { initializer }
+impl TemplateRenderer {
+    pub fn new() -> Self {
+        Self {}
     }
 }
 
-impl<I> Renderer for TemplateRenderer<I>
-where
-    I: NameInitializer,
-{
+impl Renderer for TemplateRenderer {
     type Error = anyhow::Error;
 
     async fn render(
         &self,
+        initializer: &mut impl NameInitializer,
         query: &Formula,
         instance: &Instance<'_>,
         fact_filter: Option<&[usize]>,
     ) -> Result<String, Self::Error> {
         let mut names = NameMap::new();
-        self.initializer.init_map(instance, &mut names);
+        initializer.init_map(instance, &mut names);
         let theory = instance.theory();
 
         let all_facts = instance.facts();

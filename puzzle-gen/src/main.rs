@@ -1,7 +1,9 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{self, Write};
 use std::ops::ControlFlow;
 use std::path::PathBuf;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
@@ -13,6 +15,7 @@ use smtlib::backend::cvc5_binary::Cvc5Binary;
 use crate::concrete_theories::workplace::{
     WorkplaceGenerator, WorkplaceNameInitializer, WorkplaceQueryGenerator,
 };
+use crate::pprint::PrettyFormula;
 use crate::rendering::Renderer;
 use crate::rendering::template::TemplateRenderer;
 use crate::solvers::{Backend, QueryResult, SmtBackend};
@@ -20,13 +23,13 @@ use crate::theories::{
     AblationStrategy, AllAtOnceAblation, Instance, ModelGenerator, QueryGenerator,
     StochasticAblation,
 };
-use std::collections::HashSet;
 
 #[macro_use]
 mod macros;
 mod bimulmap;
 mod concrete_theories;
 mod llm;
+mod pprint;
 mod rendering;
 mod solvers;
 mod theories;
@@ -69,9 +72,9 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     indirect_evidence_rate: f64,
 
-    /// PRNG seed.
-    #[arg(long, default_value_t = 0)]
-    seed: u64,
+    /// PRNG seed. Defaults to system epoch time if not set.
+    #[arg(long)]
+    seed: Option<u64>,
 
     /// Path to the cvc5 binary.
     #[arg(long, default_value = "cvc5")]
@@ -129,11 +132,22 @@ async fn main() -> anyhow::Result<()> {
     info!("puzzle-gen started");
     debug!("{:?}", &args);
 
-    let mut rng = rand::rngs::StdRng::seed_from_u64(args.seed);
+    let seed: u64 = args
+        .seed
+        .map(Result::<_, anyhow::Error>::Ok)
+        .unwrap_or_else(|| {
+            let now = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .context("couldn't get epoch time")?;
+            Ok(now.as_secs())
+        })?;
+    debug!("using random seed: {seed}");
+
+    let mut rng = rand::rngs::StdRng::seed_from_u64(seed);
 
     // 1. Generate a ground-truth model.
     let mut model_gen = WorkplaceGenerator::try_new(
-        rand::rngs::StdRng::seed_from_u64(args.seed.wrapping_add(1)),
+        &mut rng,
         args.span_of_control,
         args.max_depth,
         args.n_departments,
@@ -148,14 +162,13 @@ async fn main() -> anyhow::Result<()> {
     );
 
     // 2. Sample a query against the model.
-    let mut query_gen =
-        WorkplaceQueryGenerator::new(rand::rngs::StdRng::seed_from_u64(args.seed.wrapping_add(2)));
+    let mut query_gen = WorkplaceQueryGenerator::new(&mut rng);
     let query = query_gen.generate(&model);
 
     // 3. Materialise the model as an Instance with all axioms active.
     let mut instance = Instance::from_ground_model(model);
     trace!("initialized instance");
-    debug!("query: {:?}", query);
+    debug!("query: {}", PrettyFormula::from(&query, &instance));
 
     // 4. Set up the SMT backend.
     debug!("using cvc5 binary at `{}`", args.cvc5);
@@ -242,9 +255,8 @@ async fn main() -> anyhow::Result<()> {
         puzzle_status,
     );
 
-    let name_initializer =
-        WorkplaceNameInitializer::new(rand::rngs::StdRng::seed_from_u64(args.seed.wrapping_add(3)));
-    let template_renderer = TemplateRenderer::new(name_initializer);
+    let mut name_initializer = WorkplaceNameInitializer::new(&mut rng);
+    let template_renderer = TemplateRenderer::new();
     // Restrict the rendered facts to: the load-bearing subset identified by
     // the unsat core under the full theory, plus every fact that mentions a
     // domain constant from the query. The neighborhood facts give CWA
@@ -261,7 +273,12 @@ async fn main() -> anyhow::Result<()> {
     let mut fact_indices: Vec<usize> = fact_set.into_iter().collect();
     fact_indices.sort_unstable();
     let nl_story = template_renderer
-        .render(&query, &instance, Some(&fact_indices))
+        .render(
+            &mut name_initializer,
+            &query,
+            &instance,
+            Some(&fact_indices),
+        )
         .await?;
 
     let puzzle_text = match args.llm_provider {

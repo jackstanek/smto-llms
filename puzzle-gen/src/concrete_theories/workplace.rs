@@ -42,7 +42,6 @@
 //! let instance = theory.instantiate(domain);
 //! ```
 
-use std::cell::RefCell;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::OnceLock;
 
@@ -82,17 +81,17 @@ pub fn theory() -> &'static Theory {
 ///
 /// All flavors target predicates that are oracle-recoverable rather than
 /// directly asserted, so the puzzle exercises the implicit theory.
-pub struct WorkplaceQueryGenerator<R> {
-    rng: R,
+pub struct WorkplaceQueryGenerator<'r, R> {
+    rng: &'r mut R,
 }
 
-impl<R> WorkplaceQueryGenerator<R> {
-    pub fn new(rng: R) -> Self {
+impl<'r, R> WorkplaceQueryGenerator<'r, R> {
+    pub fn new(rng: &'r mut R) -> Self {
         Self { rng }
     }
 }
 
-impl<R> QueryGenerator<'static> for WorkplaceQueryGenerator<R>
+impl<'r, R> QueryGenerator<'static> for WorkplaceQueryGenerator<'r, R>
 where
     R: Rng,
 {
@@ -113,7 +112,7 @@ where
     }
 }
 
-impl<R> WorkplaceQueryGenerator<R>
+impl<'r, R> WorkplaceQueryGenerator<'r, R>
 where
     R: Rng,
 {
@@ -568,7 +567,10 @@ fn build() -> Theory {
         });
         let not_has_manager_y = Formula::Not(Box::new(has_manager_y));
         let iff = Formula::And(vec![
-            Formula::Implies(Box::new(not_has_manager_y.clone()), Box::new(is_ceo_y.clone())),
+            Formula::Implies(
+                Box::new(not_has_manager_y.clone()),
+                Box::new(is_ceo_y.clone()),
+            ),
             Formula::Implies(Box::new(is_ceo_y), Box::new(not_has_manager_y)),
         ]);
         let body = Formula::Forall(vec![(y, employee)], Box::new(iff));
@@ -586,8 +588,8 @@ fn build() -> Theory {
 }
 
 /// Generator for ground truth workplace hierarchies.
-pub struct WorkplaceGenerator<R> {
-    rng: R,
+pub struct WorkplaceGenerator<'r, R> {
+    rng: &'r mut R,
     offspring_distr: Poisson<f64>,
     max_depth: usize,
     n_departments: usize,
@@ -600,11 +602,11 @@ pub struct WorkplaceGenerator<R> {
     indirect_evidence_rate: f64,
 }
 
-impl<R> WorkplaceGenerator<R> {
+impl<'r, R> WorkplaceGenerator<'r, R> {
     /// Create a new [`WorkplaceGenerator`], failing if the span of control is
     /// invalid for a [`Poisson`] distribution.
     pub fn try_new(
-        rng: R,
+        rng: &'r mut R,
         span_of_control: f64,
         max_depth: usize,
         n_departments: usize,
@@ -620,7 +622,7 @@ impl<R> WorkplaceGenerator<R> {
     }
 }
 
-impl<R> ModelGenerator<'static> for WorkplaceGenerator<R>
+impl<'r, R> ModelGenerator<'static> for WorkplaceGenerator<'r, R>
 where
     R: Rng,
 {
@@ -645,7 +647,7 @@ where
         // probability `indirect_evidence_rate`, as one of `fired(p,q)` /
         // `approved_expense(p,q)`. The abductive-bridge axioms recover the
         // chain-of-command edge from the indirect form when active.
-        let mut emit_edge =
+        let emit_edge =
             |model: &mut GroundModel<'static>, rng: &mut R, parent: ConstId, child: ConstId| {
                 if rng.random_bool(self.indirect_evidence_rate.clamp(0.0, 1.0)) {
                     let sym = if rng.random_bool(0.5) {
@@ -693,23 +695,21 @@ where
 /// names (Alice, Brianna, ...). The CEO and department heads receive ordinary
 /// personal names too — their role is exposed only via the `is_ceo` /
 /// `is_head_of_department` facts, not baked into how they're referred to.
-pub struct WorkplaceNameInitializer<R> {
-    rng: RefCell<R>,
+pub struct WorkplaceNameInitializer<'r, R> {
+    rng: &'r mut R,
 }
 
-impl<R> WorkplaceNameInitializer<R> {
-    pub fn new(rng: R) -> Self {
-        Self {
-            rng: RefCell::new(rng),
-        }
+impl<'r, R> WorkplaceNameInitializer<'r, R> {
+    pub fn new(rng: &'r mut R) -> Self {
+        Self { rng }
     }
 }
 
-impl<R> NameInitializer for WorkplaceNameInitializer<R>
+impl<'r, R> NameInitializer for WorkplaceNameInitializer<'r, R>
 where
     R: Rng,
 {
-    fn init_map(&self, instance: &Instance<'_>, map: &mut NameMap) {
+    fn init_map(&mut self, instance: &Instance<'_>, map: &mut NameMap) {
         let theory = instance.theory();
         let employee_sort = theory.find_sort("employee");
         let department_sort = theory.find_sort("department");
@@ -740,9 +740,7 @@ where
         heads.sort_by_key(|(i, _)| *i);
         emps.sort_by_key(|(i, _)| *i);
 
-        let mut rng = self.rng.borrow_mut();
-
-        let dept_names = departments::random_balanced_names(&mut *rng, depts.len());
+        let dept_names = departments::random_balanced_names(self.rng, depts.len());
         for (&(_, id), name) in depts.iter().zip(dept_names.iter()) {
             map.insert(id, name.to_string());
         }
@@ -754,7 +752,7 @@ where
         // `is_head_of_department` facts (when rendered) or from the management
         // structure.
         let total_emps = ceo.is_some() as usize + heads.len() + emps.len();
-        let emp_names = names::random_balanced_names(&mut *rng, total_emps);
+        let emp_names = names::random_balanced_names(self.rng, total_emps);
         let mut name_iter = emp_names.iter();
 
         if let Some(id) = ceo {

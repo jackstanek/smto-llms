@@ -323,6 +323,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c8d4a3bb8b1e0c1050499d1815f5ab16d04f0959b233085fb31653fbfc9d98f9"
 
 [[package]]
+name = "clingo"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "70ea6fc1e61b1150dc3d00f641267d9b7fe143f177a4e937692f78407f3bce2b"
+dependencies = [
+ "bitflags",
+ "clingo-sys",
+ "thiserror 1.0.69",
+ "vec1",
+]
+
+[[package]]
+name = "clingo-sys"
+version = "0.7.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "299c6e4c9ca4b0e5e119d8a17e928cc4a00eafa2ec5d8416cb3e344f4382eab3"
+dependencies = [
+ "cmake",
+ "libc",
+]
+
+[[package]]
 name = "cmake"
 version = "0.1.58"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1365,6 +1387,7 @@ dependencies = [
  "askama",
  "async-trait",
  "clap",
+ "clingo",
  "env_logger",
  "itertools 0.14.0",
  "log",
@@ -2377,6 +2400,12 @@ name = "utf8parse"
 version = "0.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "06abde3611657adf66d383f00b093d7faecc7fa57071cce2578660c9f1010821"
+
+[[package]]
+name = "vec1"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eab68b56840f69efb0fefbe3ab6661499217ffdc58e2eef7c3f6f69835386322"
 
 [[package]]
 name = "version_check"

@@ -10,7 +10,11 @@
         devShells.default = pkgs.mkShell {
           packages = [
             pkgs.cvc5
+            pkgs.clingo
           ];
+          shellHook = ''
+            export CLINGO_LIBRARY_PATH="${pkgs.clingo}/lib"
+          '';
         };
       });
 }

@@ -9,7 +9,9 @@ use anyhow::{Context, anyhow};
 use clap::{Parser, ValueEnum};
 use log::{Level, debug, info, trace};
 use rand::SeedableRng;
+#[cfg(feature = "smt")]
 use smtlib::Storage;
+#[cfg(feature = "smt")]
 use smtlib::backend::cvc5_binary::Cvc5Binary;
 
 use crate::concrete_theories::workplace::{
@@ -18,7 +20,9 @@ use crate::concrete_theories::workplace::{
 use crate::pprint::PrettyFormula;
 use crate::rendering::Renderer;
 use crate::rendering::template::TemplateRenderer;
-use crate::solvers::{Backend, QueryResult, SmtBackend};
+#[cfg(feature = "smt")]
+use crate::solvers::SmtBackend;
+use crate::solvers::{Backend, QueryResult};
 use crate::theories::{
     AblationStrategy, AllAtOnceAblation, Instance, ModelGenerator, QueryGenerator,
     StochasticAblation,

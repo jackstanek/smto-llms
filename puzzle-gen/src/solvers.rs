@@ -3,8 +3,10 @@
 
 use crate::theories::{AxiomId, Formula, Instance};
 
+#[cfg(feature = "smt")]
 pub mod smt;
 
+#[cfg(feature = "smt")]
 pub use smt::SmtBackend;
 
 /// Subset of axioms + ground facts that the SMT solver reported as load-bearing
